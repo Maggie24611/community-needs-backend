@@ -7,7 +7,7 @@ import { env } from "../config/env.js";
 import { verifyWhatsAppSignature } from "../middleware/verifyWhatsApp.js";
 import { getSession, setSession } from "../services/redis.js";
 import { sendTextMessage } from "../services/whatsapp.js";
-import { handleMessage } from "../botFlow.js";     // M4 owns this module
+import { handleMessage } from "../bot/botFlow.js";     // M4 owns this module
 import { enqueueAlertJob } from "../queues/alertQueue.js";
 
 const router = Router();
