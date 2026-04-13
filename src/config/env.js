@@ -1,5 +1,4 @@
 // src/config/env.js
-// Validates all required env vars at startup — fails fast so Railway logs are clear.
 import "dotenv/config";
 
 const REQUIRED = [
@@ -31,24 +30,27 @@ export const env = {
   WA_VERIFY_TOKEN:    process.env.WHATSAPP_VERIFY_TOKEN,
   WA_APP_SECRET:      process.env.WHATSAPP_APP_SECRET,
 
-  // Anthropic
+  // Groq
   GROQ_API_KEY: process.env.GROQ_API_KEY,
 
+  // HuggingFace (optional — for embeddings)
+  HUGGINGFACE_API_KEY: process.env.HUGGINGFACE_API_KEY ?? null,
+
   // Redis / BullMQ
-  UPSTASH_REDIS_URL:  process.env.UPSTASH_REDIS_URL,
-  REDIS_HOST:         process.env.REDIS_HOST,
-  REDIS_PORT:         parseInt(process.env.REDIS_PORT, 10),
-  REDIS_PASSWORD:     process.env.REDIS_PASSWORD,
+  UPSTASH_REDIS_URL: process.env.UPSTASH_REDIS_URL,
+  REDIS_HOST:        process.env.REDIS_HOST,
+  REDIS_PORT:        parseInt(process.env.REDIS_PORT, 10),
+  REDIS_PASSWORD:    process.env.REDIS_PASSWORD,
 
   // Supabase
-  SUPABASE_URL:               process.env.SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY:  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  SUPABASE_URL:              process.env.SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
 
   // Google Maps
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY,
 
   // Crypto
-  ENCRYPTION_KEY:       process.env.ENCRYPTION_KEY,       // 64 hex chars
+  ENCRYPTION_KEY:       process.env.ENCRYPTION_KEY,
   ENCRYPTION_IV_LENGTH: parseInt(process.env.ENCRYPTION_IV_LENGTH || "16", 10),
 
   // App

@@ -1,46 +1,44 @@
 // src/queues/alertQueue.js
-// Defines the BullMQ Queue and a producer function used by the webhook route.
-// The actual job processing logic lives in worker.js.
+// BullMQ Queue — volunteer alert jobs.
 
 import { Queue } from "bullmq";
 import { env } from "../config/env.js";
 
 const QUEUE_NAME = "volunteer-alerts";
 
-// BullMQ requires ioredis connection options (not a URL string)
 const connection = {
-  host:     env.REDIS_HOST,
-  port:     env.REDIS_PORT,
-  password: env.REDIS_PASSWORD,
-  tls:      {},   // Upstash requires TLS
-  maxRetriesPerRequest: null,   // Required by BullMQ
-  enableReadyCheck: false,
+  host:                 env.REDIS_HOST,
+  port:                 env.REDIS_PORT,
+  password:             env.REDIS_PASSWORD,
+  tls:                  {},
+  maxRetriesPerRequest: null,
+  enableReadyCheck:     false,
 };
 
 export const alertQueue = new Queue(QUEUE_NAME, {
   connection,
   defaultJobOptions: {
-    attempts:     3,
-    backoff: {
-      type:  "exponential",
-      delay: 2000,           // 2s, 4s, 8s
-    },
+    attempts: 3,
+    backoff: { type: "exponential", delay: 2000 },
     removeOnComplete: { count: 100 },
     removeOnFail:     { count: 50  },
   },
 });
 
 /**
- * Add a volunteer-alert job to the queue.
+ * Enqueue a volunteer alert job.
+ *
  * @param {object} jobData
- * @param {string} jobData.userPhone      — reporter's phone (plain, for send ack)
- * @param {string} jobData.contactName    — reporter's WhatsApp display name
- * @param {object} jobData.reportPayload  — raw report from M4's bot flow
+ * @param {object} jobData.volunteer   — volunteer row from Supabase
+ * @param {object} jobData.need        — inserted need row
+ * @param {object} jobData.geo         — geocoding result { lat, lng, ward, formattedAddress }
+ * @param {string} jobData.userPhone   — reporter phone (for audit log)
+ * @param {string} jobData.contactName — reporter WhatsApp name
  */
 export async function enqueueAlertJob(jobData) {
   const job = await alertQueue.add("dispatch-alert", jobData, {
-    jobId: `alert-${jobData.userPhone}-${Date.now()}`,
+    jobId: `alert-${jobData.volunteer.id}-${jobData.need.id}-${Date.now()}`,
   });
-  console.log(`📬  Job ${job.id} added to ${QUEUE_NAME}`);
+  console.log(`📬  Alert job ${job.id} queued for volunteer ${jobData.volunteer.id}`);
   return job;
 }
