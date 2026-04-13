@@ -9,7 +9,7 @@ const SESSION_TTL_SECONDS = 60 * 60 * 2; // 2 hours
 
 // Upstash requires TLS — ioredis handles rediss:// protocol automatically
 export const redis = new Redis(env.UPSTASH_REDIS_URL, {
-  maxRetriesPerRequest: 3,
+  maxRetriesPerRequest: null,
   enableReadyCheck:     false,   // Required for Upstash
   lazyConnect:          false,
 });
