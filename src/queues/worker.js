@@ -95,4 +95,4 @@ worker.on("failed", (job, err) => {
   console.error(`❌  Job ${job?.id} failed:`, err.message);
 });
 
-console.log(`👷  BullMQ worker listening on: ${QUEUE_NAME}`);
+console.log(`👷  BullMQ worker listening on: ${QUEUE_NAME}`); 
