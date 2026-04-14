@@ -1,6 +1,10 @@
 // src/services/supabase.js
-// Supabase JS client — M2's schema confirmed Day 3.
-// RPC functions: volunteers_within_radius, find_similar_needs
+// Supabase JS client — M2's schema confirmed Day 4.
+// Key fixes:
+//   - location column: geography SRID 4326 — format: SRID=4326;POINT(lng lat)
+//   - lat and lng are SEPARATE float columns on needs table
+//   - volunteers_within_radius params: need_lat, need_lng, radius_meters
+//   - find_similar_needs params: query_embedding, match_ward, similarity_threshold, match_count
 
 import { createClient } from "@supabase/supabase-js";
 import { env } from "../config/env.js";
@@ -15,8 +19,15 @@ export const supabase = createClient(
 
 /**
  * Insert a classified need into the needs table.
+ * M2 confirmed: lat and lng are separate float columns.
+ * location column is geography SRID 4326 — lng comes FIRST.
  */
 export async function insertNeed(need) {
+  // Build geography point — lng FIRST per M2's confirmation
+  const locationWKT = (need.lat != null && need.lng != null)
+    ? `SRID=4326;POINT(${need.lng} ${need.lat})`
+    : null;
+
   const { data, error } = await supabase
     .from("needs")
     .insert({
@@ -27,7 +38,9 @@ export async function insertNeed(need) {
       urgency:             need.urgency,
       urgency_score:       need.urgency_score,
       ward:                need.ward ?? null,
-      location:            need.location ?? null,
+      location:            locationWKT,
+      lat:                 need.lat != null ? parseFloat(need.lat) : null,
+      lng:                 need.lng != null ? parseFloat(need.lng) : null,
       affected_count:      need.affected_count ?? 0,
       report_count:        need.report_count ?? 1,
       status:              need.status ?? "open",
@@ -64,21 +77,14 @@ export async function incrementReportCount(needId, newCount) {
 
 /**
  * Find similar needs using M2's find_similar_needs RPC.
- * Returns needs with similarity > threshold, sorted by similarity desc.
- *
- * @param {object} params
- * @param {number[]} params.queryEmbedding — 384-dim embedding vector
- * @param {string}   params.ward           — Mumbai ward to search within
- * @param {number}   params.threshold      — similarity threshold (0.88)
- * @param {number}   params.count          — max results to return
- * @returns {Promise<Array>}
+ * M2 confirmed params: query_embedding, match_ward, similarity_threshold, match_count
  */
 export async function findSimilarNeeds({ queryEmbedding, ward, threshold = 0.88, count = 1 }) {
   const { data, error } = await supabase.rpc("find_similar_needs", {
-    query_embedding: queryEmbedding,
-    ward,
-    threshold,
-    count,
+    query_embedding:      queryEmbedding,
+    match_ward:           ward,
+    similarity_threshold: threshold,
+    match_count:          count,
   });
 
   if (error) {
@@ -117,12 +123,12 @@ export async function insertReport(report) {
 
 /**
  * Fetch volunteers near a lat/lng using M2's PostGIS RPC.
- * Returns opted-in volunteers sorted by distance.
+ * M2 confirmed params: need_lat, need_lng, radius_meters
  */
 export async function getVolunteersNear(lat, lng, radiusMeters = 3000) {
   const { data, error } = await supabase.rpc("volunteers_within_radius", {
-    lat,
-    lng,
+    need_lat:      lat,
+    need_lng:      lng,
     radius_meters: radiusMeters,
   });
 

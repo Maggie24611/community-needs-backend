@@ -1,7 +1,7 @@
 {
   "name": "community-needs-backend",
   "version": "1.0.0",
-  "description": "Community needs aggregation platform — Node/Express backend",
+  "description": "Sahyog — Community needs aggregation platform for Mumbai",
   "main": "src/server.js",
   "type": "module",
   "scripts": {
@@ -10,16 +10,18 @@
     "worker": "node src/queues/worker.js"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
+    "@google/genai": "^0.7.0",
     "@googlemaps/google-maps-services-js": "^3.4.0",
     "@supabase/supabase-js": "^2.49.4",
     "bullmq": "^5.51.1",
+    "csv-parse": "^5.5.6",
     "dotenv": "^16.5.0",
     "express": "^4.21.2",
-    "ioredis": "^5.6.1"
+    "ioredis": "^5.6.1",
+    "multer": "^1.4.5-lts.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
