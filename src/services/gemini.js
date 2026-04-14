@@ -1,11 +1,11 @@
-// src/services/groq.js
-// Groq API — Llama 3 for free classification.
-// Output fields match M2's needs table schema exactly.
+// src/services/gemini.js
+// Google Gemini API — replaces Groq for classification.
+// Satisfies hackathon requirement: "use at least one Google AI model or service"
+// Free tier available at https://aistudio.google.com
 
 import { env } from "../config/env.js";
 
-const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
-const MODEL = "llama3-70b-8192";
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${env.GEMINI_API_KEY}`;
 
 const SYSTEM_PROMPT = `You are a structured data extractor for Sahyog — a Mumbai community needs platform.
 A community member has reported a need via WhatsApp. Extract information and return ONLY valid JSON.
@@ -28,7 +28,7 @@ Urgency guidelines:
 - low: non-urgent, informational`;
 
 /**
- * Classify a WhatsApp report using Groq (Llama 3).
+ * Classify a WhatsApp report using Google Gemini.
  * Output fields match M2's needs table schema exactly.
  *
  * @param {string} rawText — full report text from the bot conversation
@@ -42,49 +42,55 @@ Urgency guidelines:
  * }>}
  */
 export async function classifyReport(rawText) {
-  const response = await fetch(GROQ_API_URL, {
+  const response = await fetch(GEMINI_API_URL, {
     method: "POST",
     headers: {
-      "Content-Type":  "application/json",
-      "Authorization": `Bearer ${env.GROQ_API_KEY}`,
+      "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model:       MODEL,
-      max_tokens:  512,
-      temperature: 0.1,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user",   content: rawText },
+      system_instruction: {
+        parts: [{ text: SYSTEM_PROMPT }],
+      },
+      contents: [
+        {
+          parts: [{ text: rawText }],
+        },
       ],
+      generationConfig: {
+        temperature:     0.1,
+        maxOutputTokens: 512,
+      },
     }),
   });
 
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
-    console.error("❌  Groq API error:", JSON.stringify(err));
-    throw new Error(`Groq API error: ${response.status}`);
+    console.error("❌  Gemini API error:", JSON.stringify(err));
+    throw new Error(`Gemini API error: ${response.status}`);
   }
 
   const data = await response.json();
-  const text = data.choices?.[0]?.message?.content ?? "";
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+
+  // Strip markdown fences if Gemini adds them
+  const clean = text.replace(/```json|```/g, "").trim();
 
   try {
-    const parsed = JSON.parse(text);
+    const parsed = JSON.parse(clean);
 
-    // Validate and sanitize fields
     const validCategories = ["FOOD", "MEDICAL", "SHELTER", "WATER", "SAFETY", "OTHER"];
     const validUrgencies  = ["low", "medium", "high", "critical"];
 
     return {
-      category:      validCategories.includes(parsed.category) ? parsed.category : "OTHER",
-      urgency:       validUrgencies.includes(parsed.urgency)   ? parsed.urgency  : "medium",
-      summary:       parsed.summary       ?? "No summary available",
+      category:       validCategories.includes(parsed.category) ? parsed.category : "OTHER",
+      urgency:        validUrgencies.includes(parsed.urgency)   ? parsed.urgency  : "medium",
+      summary:        parsed.summary        ?? "No summary available",
       affected_count: parseInt(parsed.affected_count, 10) || 1,
-      location_text: parsed.location_text ?? "Location not specified",
-      language:      parsed.language      ?? "en",
+      location_text:  parsed.location_text  ?? "Location not specified",
+      language:       parsed.language       ?? "en",
     };
   } catch {
-    console.error("❌  Groq returned non-JSON:", text);
-    throw new Error("Classification parse error — model returned invalid JSON");
+    console.error("❌  Gemini returned non-JSON:", text);
+    throw new Error("Classification parse error — Gemini returned invalid JSON");
   }
 }

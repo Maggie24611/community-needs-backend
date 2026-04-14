@@ -15,7 +15,7 @@
 //   j. Insert action into audit_log table
 
 import crypto from "crypto";
-import { classifyReport }            from "./groq.js";
+import { classifyReport }            from "./gemini.js";
 import { generateEmbedding }         from "./embedding.js";
 import { geocodeLocation, buildGeoPoint } from "./geocoding.js";
 import { computeUrgencyScore, deriveTitleFromCategory } from "./urgencyScorer.js";
