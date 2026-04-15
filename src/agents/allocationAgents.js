@@ -113,7 +113,7 @@ No preamble, no explanation, JSON array only.`;
   // ── Call Gemini ────────────────────────────────────────────────────────────
   console.log("🧠  Calling Gemini 2.0 Flash for recommendations...");
   const response = await ai.models.generateContent({
-    model:    "gemini-2.0-flash",
+    model: 'gemini-1.5-flash',
     contents: prompt,
   });
 
