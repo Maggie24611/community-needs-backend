@@ -8,7 +8,7 @@ import multer     from "multer";
 import { parse }  from "csv-parse/sync";
 import { env }    from "./config/env.js";
 import webhookRouter from "./routes/webhook.js";
-import { runAllocationAgent } from "./agents/allocationAgent.js";
+import { runAllocationAgent } from "./agents/allocationAgents.js";
 import { supabase }           from "./services/supabase.js";
 import { generateEmbedding }  from "./services/embedding.js";
 import { classifyReport }     from "./services/gemini.js";
