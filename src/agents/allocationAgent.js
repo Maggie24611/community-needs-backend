@@ -1,101 +1,132 @@
-// src/agents/allocationAgent.js
-// Resource allocation agent — uses Groq (Llama 3) for AI analysis.
-// No Gemini, no Anthropic — Groq only.
+import { createClient } from '@supabase/supabase-js';
 
-import { supabase }          from "../services/supabase.js";
-import { runAllocationLLM }  from "../services/groq.js";
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
-function groupByWard(rows) {
-  if (!rows || rows.length === 0) return {};
-  return rows.reduce((acc, row) => {
-    const ward = row.ward || "Unknown";
+function groupByWard(items) {
+  if (!items || items.length === 0) return {};
+  return items.reduce((acc, item) => {
+    const ward = item.ward || 'Unknown';
     if (!acc[ward]) acc[ward] = [];
-    acc[ward].push(row);
+    acc[ward].push(item);
     return acc;
   }, {});
 }
 
-function countByWard(rows) {
-  if (!rows || rows.length === 0) return {};
-  return rows.reduce((acc, row) => {
-    const ward = row.ward || "Unknown";
+function countByWard(items) {
+  if (!items || items.length === 0) return {};
+  return items.reduce((acc, item) => {
+    const ward = item.ward || 'Unknown';
     acc[ward] = (acc[ward] || 0) + 1;
     return acc;
   }, {});
 }
 
-/**
- * Run the resource allocation agent.
- * Fetches live data from Supabase, calls Groq LLM,
- * writes recommendations back to Supabase.
- * @returns {Promise<Array>} — 5 prioritised recommendations
- */
-export async function runAllocationAgent() {
-  console.log("🤖  Allocation agent starting...");
+function summarizeByWard(grouped) {
+  const summary = {};
+  for (const [ward, items] of Object.entries(grouped)) {
+    summary[ward] = {
+      count: items.length,
+      categories: [...new Set(items.map(i => i.category).filter(Boolean))],
+    };
+  }
+  return summary;
+}
 
-  // Fetch active needs
+export async function runAllocationAgent() {
   const { data: needs, error: needsError } = await supabase
-    .from("needs")
-    .select("ward, category, urgency_score, status, urgency, affected_count")
-    .eq("status", "open");
+    .from('needs')
+    .select('ward, category, urgency_score, status')
+    .eq('status', 'active')
+    .limit(100);
 
   if (needsError) throw new Error(`Failed to fetch needs: ${needsError.message}`);
-  console.log(`📊  Fetched ${needs?.length ?? 0} active needs`);
 
-  // Fetch historical data (last 12 months)
-  const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000)
-    .toISOString().split("T")[0];
+  const { data: history, error: historyError } = await supabase
+    .from('historical_data')
+    .select('ward, category, date_recorded')
+    .gte(
+      'date_recorded',
+      new Date(Date.now() - 365 * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .split('T')[0]
+    )
+    .limit(100);
 
-  const { data: history } = await supabase
-    .from("historical_data")
-    .select("ward, category, data_type, date_recorded, summary")
-    .gte("date_recorded", oneYearAgo);
+  if (historyError) throw new Error(`Failed to fetch history: ${historyError.message}`);
 
-  console.log(`📚  Fetched ${history?.length ?? 0} historical records`);
+  const { data: volunteers, error: volError } = await supabase
+    .from('volunteers')
+    .select('ward, opted_in')
+    .eq('opted_in', true)
+    .limit(100);
 
-  // Fetch opted-in volunteers
-  const { data: volunteers } = await supabase
-    .from("volunteers")
-    .select("ward, categories, opted_in")
-    .eq("opted_in", true);
+  if (volError) throw new Error(`Failed to fetch volunteers: ${volError.message}`);
 
-  console.log(`👥  Fetched ${volunteers?.length ?? 0} volunteers`);
+  // Summarize data to keep prompt small
+  const needsSummary = summarizeByWard(groupByWard(needs || []));
+  const historySummary = summarizeByWard(groupByWard(history || []));
+  const volunteerCount = countByWard(volunteers || []);
 
-  // Prepare summaries
-  const wardNeedsSummary   = groupByWard(needs ?? []);
-  const wardHistorySummary = groupByWard(history ?? []);
-  const wardVolunteerCount = countByWard(volunteers ?? []);
+  const prompt = `You are a resource allocation expert for Mumbai NGOs.
 
-  // Call Groq LLM
-  console.log("🧠  Calling Groq Llama 3 for recommendations...");
-  const recommendations = await runAllocationLLM({
-    wardNeedsSummary,
-    wardHistorySummary,
-    wardVolunteerCount,
+ACTIVE NEEDS BY WARD: ${JSON.stringify(needsSummary)}
+HISTORICAL PATTERNS: ${JSON.stringify(historySummary)}
+VOLUNTEERS BY WARD: ${JSON.stringify(volunteerCount)}
+
+Return ONLY a valid JSON array of exactly 5 objects with these fields:
+[{
+  "priority_rank": 1,
+  "ward_name": "string",
+  "primary_issue": "string",
+  "urgency_level": "Critical|High|Medium",
+  "reasoning": "string",
+  "recommended_action": "string",
+  "volunteer_gap": true
+}]
+
+JSON array only. No explanation, no markdown.`;
+
+  console.log('Calling Groq API, prompt length:', prompt.length);
+
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 1024,
+      temperature: 0.2
+    })
   });
 
-  console.log(`✅  Got ${recommendations.length} recommendations`);
-
-  // Save to Supabase recommendations table
-  const { error: insertError } = await supabase
-    .from("recommendations")
-    .insert({
-      week_starting:   new Date().toISOString().split("T")[0],
-      recommendations,
-      ward_count:      recommendations.length,
-      generated_by:    "groq_llama3_70b",
-      input_summary: {
-        active_needs:         needs?.length ?? 0,
-        historical_records:   history?.length ?? 0,
-        available_volunteers: volunteers?.length ?? 0,
-      },
-    });
-
-  if (insertError) {
-    console.warn("⚠️  Could not save recommendations:", insertError.message);
-  } else {
-    console.log("✅  Recommendations saved to Supabase");
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Groq API error: ${response.status} - ${err}`);
   }
+
+  const data = await response.json();
+  const text = data.choices[0].message.content;
+  console.log('Groq raw response:', text.substring(0, 200));
+
+  const clean = text.replace(/```json|```/g, '').trim();
+  const recommendations = JSON.parse(clean);
+
+  await supabase.from('recommendations').insert({
+    week_starting: new Date().toISOString().split('T')[0],
+    recommendations: recommendations,
+    ward_count: recommendations.length,
+    input_summary: {
+      active_needs: (needs || []).length,
+      historical_records: (history || []).length,
+      available_volunteers: (volunteers || []).length
+    }
+  });
 
   return recommendations;
 }
