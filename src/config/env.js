@@ -6,7 +6,7 @@ const REQUIRED = [
   "WHATSAPP_ACCESS_TOKEN",
   "WHATSAPP_VERIFY_TOKEN",
   "WHATSAPP_APP_SECRET",
-  "GEMINI_API_KEY",
+  "GROQ_API_KEY",
   "UPSTASH_REDIS_URL",
   "REDIS_HOST",
   "REDIS_PORT",
@@ -30,14 +30,11 @@ export const env = {
   WA_VERIFY_TOKEN:    process.env.WHATSAPP_VERIFY_TOKEN,
   WA_APP_SECRET:      process.env.WHATSAPP_APP_SECRET,
 
-  // Google Gemini — satisfies hackathon Google AI requirement
-  GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+  // Groq — used for classification AND allocation agent
+  GROQ_API_KEY: process.env.GROQ_API_KEY,
 
-  // HuggingFace (optional — for embeddings)
+  // HuggingFace — optional, for embeddings
   HUGGINGFACE_API_KEY: process.env.HUGGINGFACE_API_KEY ?? null,
-
-  // Groq (kept as fallback — optional)
-  GROQ_API_KEY: process.env.GROQ_API_KEY ?? null,
 
   // Redis / BullMQ
   UPSTASH_REDIS_URL: process.env.UPSTASH_REDIS_URL,
@@ -57,6 +54,6 @@ export const env = {
   ENCRYPTION_IV_LENGTH: parseInt(process.env.ENCRYPTION_IV_LENGTH || "16", 10),
 
   // App
-  PORT:     parseInt(process.env.PORT || "3000", 10),
+  PORT:     parseInt(process.env.PORT || "8080", 10),
   NODE_ENV: process.env.NODE_ENV || "development",
 };

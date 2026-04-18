@@ -1,17 +1,17 @@
 // src/server.js
-// Entry point — Express app with all routes.
-// Day 4: Added /api/recommendations and /api/historical-data/upload
+// Express app entry point.
+// No Gemini — Groq only for all AI calls.
 
 import "./config/env.js";
-import express    from "express";
-import multer     from "multer";
-import { parse }  from "csv-parse/sync";
-import { env }    from "./config/env.js";
-import webhookRouter from "./routes/webhook.js";
-import { runAllocationAgent } from "./agents/allocationAgents.js";
+import express   from "express";
+import multer    from "multer";
+import { parse } from "csv-parse/sync";
+import { env }   from "./config/env.js";
+import webhookRouter          from "./routes/webhook.js";
+import { runAllocationAgent } from "./agents/allocationAgent.js";
 import { supabase }           from "./services/supabase.js";
 import { generateEmbedding }  from "./services/embedding.js";
-import { classifyReport }     from "./services/gemini.js";
+import { classifyReport }     from "./services/groq.js";
 
 const app    = express();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -32,30 +32,28 @@ app.use("/webhook", webhookRouter);
 app.get("/health", (_req, res) => {
   res.json({
     status:  "ok",
-    service: "community-needs-backend",
+    service: "sahyog-backend",
     ts:      new Date().toISOString(),
   });
 });
 
-// ─── Gemini Allocation Agent ──────────────────────────────────────────────────
+// ─── Allocation Agent ─────────────────────────────────────────────────────────
 // GET /api/recommendations
-// Calls Gemini to analyse needs + history + volunteers
-// and returns prioritised ward deployment plan
+// Calls Groq Llama 3 to analyse needs + history + volunteers
+// Returns prioritised ward deployment plan
 app.get("/api/recommendations", async (_req, res) => {
   try {
-    console.log("📡  GET /api/recommendations — running allocation agent...");
+    console.log("📡  GET /api/recommendations");
     const recommendations = await runAllocationAgent();
     res.json({ success: true, data: recommendations });
   } catch (err) {
-    console.error("❌  Allocation agent error:", err.message);
+    console.error("❌  Agent error:", err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
 // ─── CSV Historical Data Upload ───────────────────────────────────────────────
 // POST /api/historical-data/upload
-// Accepts a CSV file, classifies each row using Gemini,
-// generates embeddings, and inserts into historical_data table
 app.post("/api/historical-data/upload", upload.single("file"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ success: false, error: "No file uploaded" });
@@ -80,15 +78,14 @@ app.post("/api/historical-data/upload", upload.single("file"), async (req, res) 
     try {
       const rawContent = Object.values(row).join(" ");
 
-      // Classify row using Gemini
+      // Classify using Groq
       const structured = await classifyReport(
-        `Extract NGO record fields from this data. Record: ${JSON.stringify(row)}`
+        `Extract NGO record info from: ${JSON.stringify(row)}`
       );
 
-      // Generate embedding for similarity search
+      // Generate embedding
       const embedding = await generateEmbedding(rawContent);
 
-      // Insert into historical_data table
       const { error } = await supabase
         .from("historical_data")
         .insert({
@@ -104,13 +101,11 @@ app.post("/api/historical-data/upload", upload.single("file"), async (req, res) 
         });
 
       if (error) {
-        console.warn(`⚠️  Row insert failed:`, error.message);
         errors.push({ row: processed + 1, error: error.message });
       } else {
         processed++;
       }
     } catch (err) {
-      console.warn(`⚠️  Row ${processed + 1} error:`, err.message);
       errors.push({ row: processed + 1, error: err.message });
     }
   }
@@ -120,17 +115,16 @@ app.post("/api/historical-data/upload", upload.single("file"), async (req, res) 
     processed,
     total:     rows.length,
     errors:    errors.length > 0 ? errors : undefined,
-    message:   `${processed} of ${rows.length} records added to historical_data`,
+    message:   `${processed} of ${rows.length} records added`,
   });
 });
 
-// ─── 404 fallback ─────────────────────────────────────────────────────────────
+// ─── 404 ──────────────────────────────────────────────────────────────────────
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-// Cloud Run uses PORT 8080 by default
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`🚀  Server running on port ${PORT} [${env.NODE_ENV}]`);

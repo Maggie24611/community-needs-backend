@@ -1,13 +1,11 @@
 // src/services/reportPipeline.js
 // Complete ingestion pipeline — steps a through j.
-// Day 4 fixes:
-//   - Pass lat and lng as separate floats to insertNeed
-//   - Updated categories include Environment, Sanitation
+// Uses Groq for classification. No Gemini anywhere.
 
 import crypto from "crypto";
-import { classifyReport }            from "./gemini.js";
-import { generateEmbedding }         from "./embedding.js";
-import { geocodeLocation }           from "./geocoding.js";
+import { classifyReport }        from "./groq.js";
+import { generateEmbedding }     from "./embedding.js";
+import { geocodeLocation }       from "./geocoding.js";
 import { computeUrgencyScore, deriveTitleFromCategory } from "./urgencyScorer.js";
 import {
   insertNeed,
@@ -19,24 +17,15 @@ import {
 } from "./supabase.js";
 import { enqueueAlertJob } from "../queues/alertQueue.js";
 
-/**
- * Hash a phone number — SHA-256 hex. NOT reversible.
- */
 export function hashPhone(phone) {
   return crypto.createHash("sha256").update(phone).digest("hex");
 }
 
-/**
- * Generate reference ID in format MUM-XXXX
- */
 export function generateReferenceId() {
   const num = Math.floor(1000 + Math.random() * 9000);
   return `MUM-${num}`;
 }
 
-/**
- * Main ingestion pipeline — steps a through j.
- */
 export async function processReport({
   userPhone,
   rawText,
@@ -46,30 +35,29 @@ export async function processReport({
 }) {
   console.log(`🔄  Pipeline starting for ${userPhone}`);
 
-  // ── Step a: Classify via Gemini ───────────────────────────────────────────
-  console.log("🧠  Step a: Classifying with Gemini...");
+  // Step a: Classify via Groq
+  console.log("🧠  Step a: Classifying with Groq...");
   const classification = await classifyReport(rawText);
   console.log("✅  Classification:", classification);
 
-  // ── Step b: Geocode location ──────────────────────────────────────────────
+  // Step b: Geocode
   console.log(`📍  Step b: Geocoding "${classification.location_text}"...`);
   const geo = await geocodeLocation(classification.location_text);
   console.log(geo ? `✅  Geocoded: (${geo.lat}, ${geo.lng})` : "⚠️  Geocoding failed");
 
-  // ── Step c: Generate embedding ────────────────────────────────────────────
+  // Step c: Embedding
   console.log("🔢  Step c: Generating embedding...");
   let embedding = null;
   try {
     embedding = await generateEmbedding(rawText);
     if (embedding) console.log("✅  Embedding generated");
   } catch (err) {
-    console.warn("⚠️  Embedding failed — skipping deduplication:", err.message);
+    console.warn("⚠️  Embedding failed:", err.message);
   }
 
-  // ── Step d: Deduplication ─────────────────────────────────────────────────
+  // Step d: Deduplication
   console.log("🔍  Step d: Checking for duplicates...");
   let existingNeed = null;
-
   if (embedding && geo?.ward) {
     try {
       const similar = await findSimilarNeeds({
@@ -78,32 +66,30 @@ export async function processReport({
         threshold:      0.88,
         count:          1,
       });
-
       if (similar && similar.length > 0) {
         existingNeed = similar[0];
         console.log(`⚠️  Duplicate found: ${existingNeed.id}`);
         await incrementReportCount(existingNeed.id, existingNeed.report_count + 1);
       }
     } catch (err) {
-      console.warn("⚠️  Deduplication check failed:", err.message);
+      console.warn("⚠️  Dedup failed:", err.message);
     }
   }
 
-  // ── Step e & f: Insert new need if no duplicate ───────────────────────────
+  // Step e & f: Insert need
   let need;
   if (existingNeed) {
     need = existingNeed;
     console.log(`♻️  Using existing need: ${need.id}`);
   } else {
     console.log("💾  Step e/f: Inserting new need...");
-
     const referenceId  = generateReferenceId();
     const urgencyScore = computeUrgencyScore({
       urgency:        classification.urgency,
       report_count:   reportCount,
       affected_count: classification.affected_count,
     });
-    const title    = deriveTitleFromCategory(
+    const title     = deriveTitleFromCategory(
       classification.category,
       geo?.formattedAddress ?? classification.location_text
     );
@@ -117,7 +103,6 @@ export async function processReport({
       urgency:             classification.urgency,
       urgency_score:       urgencyScore,
       ward:                geo?.ward ?? null,
-      // M2 confirmed: lat and lng are separate float columns
       lat:                 geo?.lat ?? null,
       lng:                 geo?.lng ?? null,
       affected_count:      classification.affected_count,
@@ -127,11 +112,10 @@ export async function processReport({
       reporter_phone_hash: phoneHash,
       reporter_consented:  consented,
     });
-
     console.log(`✅  Need inserted: ${need.id} (${referenceId})`);
   }
 
-  // ── Step g: Get nearest 3 volunteers ─────────────────────────────────────
+  // Step g: Fetch volunteers
   console.log("👥  Step g: Fetching nearby volunteers...");
   let volunteers = [];
   if (geo) {
@@ -144,7 +128,7 @@ export async function processReport({
     }
   }
 
-  // ── Step h: Enqueue BullMQ alert jobs ────────────────────────────────────
+  // Step h: Queue alerts
   console.log("📬  Step h: Queuing alert jobs...");
   let volunteersQueued = 0;
   for (const volunteer of volunteers) {
@@ -155,10 +139,8 @@ export async function processReport({
       console.error("❌  Failed to enqueue alert:", err.message);
     }
   }
-  console.log(`✅  ${volunteersQueued} alert job(s) queued`);
 
-  // ── Step i: Insert raw report ─────────────────────────────────────────────
-  console.log("📝  Step i: Inserting raw report...");
+  // Step i: Insert raw report
   const phoneHash = hashPhone(userPhone);
   const report = await insertReport({
     need_id:       need.id,
@@ -169,16 +151,14 @@ export async function processReport({
   });
   console.log(`✅  Report inserted: ${report.id}`);
 
-  // ── Step j: Audit log ─────────────────────────────────────────────────────
+  // Step j: Audit log
   await writeAuditLog({
     user_id:    phoneHash,
     action:     existingNeed ? "INCREMENT_REPORT_COUNT" : "INSERT_NEED",
     table_name: "needs",
     record_id:  need.id,
   });
-  console.log("✅  Audit log written");
 
   console.log(`🎉  Pipeline complete — ${need.reference_id}`);
-
   return { need, report, geo, classification, volunteersQueued, isDuplicate: !!existingNeed };
 }
