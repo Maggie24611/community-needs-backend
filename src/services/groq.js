@@ -1,7 +1,6 @@
 // src/services/groq.js
-// Groq API — Llama 3 for classification AND allocation agent.
-// Classification: llama3-70b-8192 (fast, cheap)
-// Allocation: llama-3.1-70b-versatile (larger context window)
+// Groq API — Llama 3.3 for classification AND allocation agent.
+// Both use llama-3.3-70b-versatile (latest, not deprecated)
 
 import { env } from "../config/env.js";
 
@@ -30,7 +29,7 @@ Urgency guidelines:
 - low: non-urgent, informational`;
 
 /**
- * Classify a WhatsApp report using Groq (Llama 3).
+ * Classify a WhatsApp report using Groq (Llama 3.3).
  * @param {string} rawText
  * @returns {Promise<object>}
  */
@@ -42,7 +41,7 @@ export async function classifyReport(rawText) {
       "Authorization": `Bearer ${env.GROQ_API_KEY}`,
     },
     body: JSON.stringify({
-      model:       "llama3-70b-8192",
+      model:       "llama-3.3-70b-versatile",
       max_tokens:  512,
       temperature: 0.1,
       messages: [
@@ -97,8 +96,7 @@ Each object must have exactly these fields:
 }`;
 
 /**
- * Run resource allocation analysis using Groq Llama 3.1.
- * Uses llama-3.1-70b-versatile for larger context window.
+ * Run resource allocation analysis using Groq Llama 3.3.
  * @param {object} data
  * @returns {Promise<Array>}
  */
@@ -121,7 +119,7 @@ Return ONLY a JSON array of exactly 5 prioritised ward recommendations. No markd
       "Authorization": `Bearer ${env.GROQ_API_KEY}`,
     },
     body: JSON.stringify({
-      model:       "llama-3.1-70b-versatile",
+      model:       "llama-3.3-70b-versatile",
       max_tokens:  1024,
       temperature: 0.2,
       messages: [
