@@ -1,11 +1,11 @@
 // src/services/groq.js
-// Groq API — Llama 3 for free classification AND allocation agent.
-// No Gemini anywhere in this project.
+// Groq API — Llama 3 for classification AND allocation agent.
+// Classification: llama3-70b-8192 (fast, cheap)
+// Allocation: llama-3.1-70b-versatile (larger context window)
 
 import { env } from "../config/env.js";
 
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
-const MODEL = "llama3-70b-8192";
 
 // ─── Classification ───────────────────────────────────────────────────────────
 
@@ -42,7 +42,7 @@ export async function classifyReport(rawText) {
       "Authorization": `Bearer ${env.GROQ_API_KEY}`,
     },
     body: JSON.stringify({
-      model:       MODEL,
+      model:       "llama3-70b-8192",
       max_tokens:  512,
       temperature: 0.1,
       messages: [
@@ -63,7 +63,6 @@ export async function classifyReport(rawText) {
 
   try {
     const parsed = JSON.parse(text);
-
     const validCategories = ["FOOD", "MEDICAL", "SHELTER", "WATER", "SAFETY", "ENVIRONMENT", "SANITATION", "OTHER"];
     const validUrgencies  = ["low", "medium", "high", "critical"];
 
@@ -76,12 +75,12 @@ export async function classifyReport(rawText) {
       language:       parsed.language       ?? "en",
     };
   } catch {
-    console.error("❌  Groq classify returned non-JSON:", text);
+    console.error("❌  Groq classify non-JSON:", text);
     throw new Error("Classification parse error");
   }
 }
 
-// ─── Allocation Agent ─────────────────────────────────────────────────────────
+// ─── Allocation Agent LLM ─────────────────────────────────────────────────────
 
 const ALLOCATION_SYSTEM_PROMPT = `You are a resource allocation expert for Mumbai NGOs working on PS5: Smart Resource Allocation.
 Analyse the provided data and return a prioritised deployment plan.
@@ -98,9 +97,10 @@ Each object must have exactly these fields:
 }`;
 
 /**
- * Run resource allocation analysis using Groq (Llama 3).
- * @param {object} data — { wardNeedsSummary, wardHistorySummary, wardVolunteerCount }
- * @returns {Promise<Array>} — array of 5 recommendations
+ * Run resource allocation analysis using Groq Llama 3.1.
+ * Uses llama-3.1-70b-versatile for larger context window.
+ * @param {object} data
+ * @returns {Promise<Array>}
  */
 export async function runAllocationLLM({ wardNeedsSummary, wardHistorySummary, wardVolunteerCount }) {
   const userPrompt = `CURRENT ACTIVE NEEDS BY WARD:
@@ -112,7 +112,7 @@ ${JSON.stringify(wardHistorySummary, null, 2)}
 AVAILABLE VOLUNTEERS BY WARD:
 ${JSON.stringify(wardVolunteerCount, null, 2)}
 
-Return ONLY a JSON array of exactly 5 prioritised ward recommendations.`;
+Return ONLY a JSON array of exactly 5 prioritised ward recommendations. No markdown, no explanation.`;
 
   const response = await fetch(GROQ_API_URL, {
     method: "POST",
@@ -121,7 +121,7 @@ Return ONLY a JSON array of exactly 5 prioritised ward recommendations.`;
       "Authorization": `Bearer ${env.GROQ_API_KEY}`,
     },
     body: JSON.stringify({
-      model:       MODEL,
+      model:       "llama-3.1-70b-versatile",
       max_tokens:  1024,
       temperature: 0.2,
       messages: [
@@ -137,14 +137,14 @@ Return ONLY a JSON array of exactly 5 prioritised ward recommendations.`;
     throw new Error(`Groq API error: ${response.status}`);
   }
 
-  const data = await response.json();
-  const text = data.choices?.[0]?.message?.content ?? "";
+  const data  = await response.json();
+  const text  = data.choices?.[0]?.message?.content ?? "";
   const clean = text.replace(/```json|```/g, "").trim();
 
   try {
     return JSON.parse(clean);
   } catch {
-    console.error("❌  Groq allocation returned non-JSON:", text);
+    console.error("❌  Groq allocation non-JSON:", text);
     throw new Error("Allocation parse error");
   }
 }
