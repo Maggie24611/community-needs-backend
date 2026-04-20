@@ -1,6 +1,6 @@
 // src/services/groq.js
-// Groq API — Llama 3.3 for classification AND allocation agent.
-// Both use llama-3.3-70b-versatile (latest, not deprecated)
+// Groq API — Llama 3 for classification AND allocation agent.
+// Day 6: Updated category and urgency values to match M2's schema exactly.
 
 import { env } from "../config/env.js";
 
@@ -14,22 +14,32 @@ Do not include markdown fences, explanation, or any text outside the JSON object
 
 Return exactly this JSON structure:
 {
-  "category": string,        // one of: FOOD | MEDICAL | SHELTER | WATER | SAFETY | ENVIRONMENT | SANITATION | OTHER
-  "urgency": string,         // one of: "low" | "medium" | "high" | "critical"
+  "category": string,        // one of: "Food & water" | "Medical" | "Shelter" | "Education" | "Safety" | "Environment" | "Sanitation" | "Other"
+  "urgency": string,         // one of: "Critical" | "High" | "Medium" | "Low"
   "summary": string,         // concise 1-2 sentence summary in English
   "affected_count": number,  // estimated number of people affected (default 1 if unknown)
   "location_text": string,   // location exactly as described by the reporter
   "language": string         // detected language code: "en" | "hi" | "mr" | "gu" | "other"
 }
 
+Category guidelines:
+- "Food & water": food shortage, hunger, drinking water issues
+- "Medical": injuries, illness, medical emergencies
+- "Shelter": housing, displacement, roof damage
+- "Education": school, children learning needs
+- "Safety": crime, accidents, danger
+- "Environment": pollution, floods, environmental hazards
+- "Sanitation": garbage, sewage, hygiene issues
+- "Other": anything that doesn't fit above
+
 Urgency guidelines:
-- critical: immediate life threat, medical emergency, no food for children
-- high: serious need within hours, large group affected
-- medium: need within a day, manageable situation
-- low: non-urgent, informational`;
+- Critical: immediate life threat, medical emergency, no food for children
+- High: serious need within hours, large group affected
+- Medium: need within a day, manageable situation
+- Low: non-urgent, informational`;
 
 /**
- * Classify a WhatsApp report using Groq (Llama 3.3).
+ * Classify a WhatsApp report using Groq (Llama 3).
  * @param {string} rawText
  * @returns {Promise<object>}
  */
@@ -41,7 +51,7 @@ export async function classifyReport(rawText) {
       "Authorization": `Bearer ${env.GROQ_API_KEY}`,
     },
     body: JSON.stringify({
-      model:       "llama-3.3-70b-versatile",
+      model:       "llama3-70b-8192",
       max_tokens:  512,
       temperature: 0.1,
       messages: [
@@ -62,12 +72,13 @@ export async function classifyReport(rawText) {
 
   try {
     const parsed = JSON.parse(text);
-    const validCategories = ["FOOD", "MEDICAL", "SHELTER", "WATER", "SAFETY", "ENVIRONMENT", "SANITATION", "OTHER"];
-    const validUrgencies  = ["low", "medium", "high", "critical"];
+
+    const validCategories = ["Food & water", "Medical", "Shelter", "Education", "Safety", "Environment", "Sanitation", "Other"];
+    const validUrgencies  = ["Critical", "High", "Medium", "Low"];
 
     return {
-      category:       validCategories.includes(parsed.category) ? parsed.category : "OTHER",
-      urgency:        validUrgencies.includes(parsed.urgency)   ? parsed.urgency  : "medium",
+      category:       validCategories.includes(parsed.category) ? parsed.category : "Other",
+      urgency:        validUrgencies.includes(parsed.urgency)   ? parsed.urgency  : "Medium",
       summary:        parsed.summary        ?? "No summary available",
       affected_count: parseInt(parsed.affected_count, 10) || 1,
       location_text:  parsed.location_text  ?? "Location not specified",
@@ -96,8 +107,8 @@ Each object must have exactly these fields:
 }`;
 
 /**
- * Run resource allocation analysis using Groq Llama 3.3.
- * @param {object} data
+ * Run resource allocation analysis using Groq Llama 3.1.
+ * @param {object} params
  * @returns {Promise<Array>}
  */
 export async function runAllocationLLM({ wardNeedsSummary, wardHistorySummary, wardVolunteerCount }) {
@@ -119,7 +130,7 @@ Return ONLY a JSON array of exactly 5 prioritised ward recommendations. No markd
       "Authorization": `Bearer ${env.GROQ_API_KEY}`,
     },
     body: JSON.stringify({
-      model:       "llama-3.3-70b-versatile",
+      model:       "llama-3.1-70b-versatile",
       max_tokens:  1024,
       temperature: 0.2,
       messages: [

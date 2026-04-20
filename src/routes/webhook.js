@@ -1,108 +1,79 @@
-// src/routes/webhook.js
-// GET  /webhook  — Meta's one-time verification handshake
-// POST /webhook  — Incoming WhatsApp messages & status updates
+// src/routes/webhook.js — WhatsApp webhook endpoint
+// Receives incoming messages, does quick validation, then enqueues for async processing.
 
-import { Router } from "express";
-import { env } from "../config/env.js";
-import { verifyWhatsAppSignature } from "../middleware/verifyWhatsApp.js";
-import { getSession, setSession } from "../services/redis.js";
-import { sendTextMessage } from "../services/whatsapp.js";
-import { handleMessage } from "../bot/botFlow.js";     // M4 owns this module
-import { enqueueAlertJob } from "../queues/alertQueue.js";
+import { Router } from 'express';
+import { enqueueReport } from '../queues/setup.js';
 
 const router = Router();
 
-// ─── GET /webhook — Meta verification handshake ───────────────────────────────
-// Meta sends hub.mode, hub.verify_token, hub.challenge as query params.
-// We echo back hub.challenge only if verify_token matches.
-router.get("/", (req, res) => {
-  const mode      = req.query["hub.mode"];
-  const token     = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-  console.log('Meta sent token:', req.query['hub.verify_token']);
-  console.log('Expected token:', process.env.WHATSAPP_VERIFY_TOKEN);
+/**
+ * POST /webhook/whatsapp
+ * Twilio / WhatsApp Business API webhook.
+ * Responds immediately with 200 — processing is async via BullMQ.
+ */
+router.post('/whatsapp', async (req, res) => {
+  try {
+    const body = req.body;
 
-  if (mode === "subscribe" && token === env.WA_VERIFY_TOKEN) {
-    console.log("✅  WhatsApp webhook verified by Meta");
-    return res.status(200).send(challenge);
+    // ── Support both Twilio and WhatsApp Business API formats ──────────────
+    let sender_id, raw_text, lat, lng;
+
+    if (body.From && body.Body) {
+      // Twilio format
+      sender_id = body.From;
+      raw_text  = body.Body;
+      lat       = body.Latitude  ? parseFloat(body.Latitude)  : null;
+      lng       = body.Longitude ? parseFloat(body.Longitude) : null;
+    } else if (body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
+      // WhatsApp Business Cloud API format
+      const msg = body.entry[0].changes[0].value.messages[0];
+      sender_id = msg.from;
+      raw_text  = msg.text?.body ?? msg.interactive?.button_reply?.title ?? '';
+      if (msg.location) {
+        lat = msg.location.latitude;
+        lng = msg.location.longitude;
+      }
+    } else {
+      return res.status(400).json({ error: 'Unrecognised webhook format' });
+    }
+
+    if (!raw_text?.trim()) {
+      return res.status(200).json({ status: 'ignored', reason: 'empty message' });
+    }
+
+    const jobId = await enqueueReport({
+      sender_id,
+      raw_text:    raw_text.trim(),
+      lat,
+      lng,
+      ward:        null,   // will be resolved by classifier or geocoder
+      timestamp:   new Date().toISOString(),
+      source:      'whatsapp',
+    });
+
+    // Always respond 200 quickly — Twilio retries on timeout
+    res.status(200).json({ status: 'queued', job_id: jobId });
+
+  } catch (err) {
+    console.error('[Webhook] Error:', err);
+    // Still return 200 to avoid Twilio retries flooding the queue
+    res.status(200).json({ status: 'error', message: err.message });
   }
-
-  console.warn("⚠️  Webhook verification failed — token mismatch or wrong mode");
-  return res.status(403).send("Forbidden");
 });
 
-// ─── POST /webhook — Incoming messages ────────────────────────────────────────
-// express.raw() is applied at server level for this route (see server.js).
-// verifyWhatsAppSignature middleware parses body to JSON after HMAC check.
-router.post(
-  "/",
-  verifyWhatsAppSignature,
-  async (req, res) => {
-    // Acknowledge immediately — Meta retries if it doesn't get 200 within 20 s
-    res.status(200).json({ status: "ok" });
+/**
+ * GET /webhook/whatsapp — Twilio webhook verification
+ */
+router.get('/whatsapp', (req, res) => {
+  const mode      = req.query['hub.mode'];
+  const token     = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
 
-    try {
-      const body = req.body;
-
-      // Guard: only process whatsapp_business_account events
-      if (body.object !== "whatsapp_business_account") return;
-
-      for (const entry of body.entry ?? []) {
-        for (const change of entry.changes ?? []) {
-          if (change.field !== "messages") continue;
-
-          const value    = change.value;
-          const messages = value.messages ?? [];
-          const contacts = value.contacts ?? [];
-
-          for (const message of messages) {
-            // Only handle inbound text messages for now
-            if (message.type !== "text") continue;
-
-            const userPhone   = message.from;               // E.164 without +
-            const incomingText = message.text.body.trim();
-            const contactName  = contacts[0]?.profile?.name ?? "User";
-
-            console.log(`📩  [${userPhone}] ${contactName}: "${incomingText}"`);
-
-            // ── Load session from Redis ──────────────────────────────────────
-            const sessionState = await getSession(userPhone);
-
-            // ── Delegate to M4's bot flow ────────────────────────────────────
-            // handleMessage is pure — takes state in, returns state + output
-            const { reply, newSessionState, reportPayload } = await handleMessage(
-              userPhone,
-              incomingText,
-              sessionState
-            );
-
-            // ── Persist updated session ──────────────────────────────────────
-            await setSession(userPhone, newSessionState);
-
-            // ── Send reply via WhatsApp ──────────────────────────────────────
-            if (reply) {
-              await sendTextMessage(userPhone, reply);
-            }
-
-            // ── If bot completed a report, enqueue for async processing ──────
-            // reportPayload is non-null only when M4 signals report completion
-            if (reportPayload) {
-              await enqueueAlertJob({
-                userPhone,
-                contactName,
-                reportPayload,
-              });
-              console.log(`📋  Report enqueued for ${userPhone}`);
-            }
-          }
-        }
-      }
-    } catch (err) {
-      // Error is caught here so Meta's 200 ACK (sent above) isn't affected.
-      // Do NOT re-throw — Meta would retry and flood users.
-      console.error("❌  Error processing webhook payload:", err);
-    }
+  if (mode === 'subscribe' && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+    res.status(200).send(challenge);
+  } else {
+    res.status(403).send('Forbidden');
   }
-);
+});
 
 export default router;

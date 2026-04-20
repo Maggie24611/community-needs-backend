@@ -1,6 +1,6 @@
 // src/services/reportPipeline.js
 // Complete ingestion pipeline — steps a through j.
-// Uses Groq for classification. No Gemini anywhere.
+// Day 6: status is now "active" (not "open"), urgency is Title Case.
 
 import crypto from "crypto";
 import { classifyReport }        from "./groq.js";
@@ -107,7 +107,7 @@ export async function processReport({
       lng:                 geo?.lng ?? null,
       affected_count:      classification.affected_count,
       report_count:        reportCount,
-      status:              "open",
+      status:              "active",        // M2 confirmed: "active" not "open"
       embedding,
       reporter_phone_hash: phoneHash,
       reporter_consented:  consented,
