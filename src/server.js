@@ -125,7 +125,6 @@ app.post("/api/historical-data/upload", upload.single("file"), async (req, res) 
           source_ngo:      req.body.ngo_name || "Unknown",
           data_type,
           ward,
-          location:        ward,
           category,
           date_recorded:   date,
           summary:         structured.summary ?? rawContent.substring(0, 200),
