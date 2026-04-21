@@ -1,6 +1,7 @@
 // src/server.js
 // Express app entry point.
 // Groq llama-3.3-70b-versatile for all AI calls.
+// Body parsing: express.json() for all routes including webhook.
 
 import "./config/env.js";
 import express   from "express";
@@ -24,13 +25,13 @@ const VALID_CATEGORIES = ["Food & water", "Medical", "Shelter", "Education", "Sa
 function mapCategory(raw) {
   if (!raw) return "Other";
   const r = raw.toLowerCase();
-  if (r.includes("food") || r.includes("water"))  return "Food & water";
+  if (r.includes("food") || r.includes("water"))     return "Food & water";
   if (r.includes("medical") || r.includes("health")) return "Medical";
-  if (r.includes("shelter"))   return "Shelter";
-  if (r.includes("education")) return "Education";
-  if (r.includes("safety"))    return "Safety";
-  if (r.includes("environment")) return "Environment";
-  if (r.includes("sanitation")) return "Sanitation";
+  if (r.includes("shelter"))                         return "Shelter";
+  if (r.includes("education"))                       return "Education";
+  if (r.includes("safety"))                          return "Safety";
+  if (r.includes("environment"))                     return "Environment";
+  if (r.includes("sanitation"))                      return "Sanitation";
   return "Other";
 }
 
@@ -38,23 +39,19 @@ function mapCategory(raw) {
 function mapDataType(raw) {
   if (!raw) return "field_report";
   const r = raw.toLowerCase().replace(/\s+/g, "_");
-  if (VALID_DATA_TYPES.includes(r)) return r;
-  if (r.includes("survey"))   return "survey";
-  if (r.includes("health"))   return "health_record";
-  if (r.includes("census"))   return "census";
-  if (r.includes("government") || r.includes("govt")) return "government_data";
-  if (r.includes("drive"))    return "drive_outcome";
+  if (VALID_DATA_TYPES.includes(r))                           return r;
+  if (r.includes("survey"))                                   return "survey";
+  if (r.includes("health"))                                   return "health_record";
+  if (r.includes("census"))                                   return "census";
+  if (r.includes("government") || r.includes("govt"))        return "government_data";
+  if (r.includes("drive"))                                    return "drive_outcome";
   return "field_report";
 }
 
 // ─── Body parsing ─────────────────────────────────────────────────────────────
-app.use((req, res, next) => {
-  if (req.path === "/webhook" && req.method === "POST") {
-    express.raw({ type: "application/json" })(req, res, next);
-  } else {
-    express.json()(req, res, next);
-  }
-});
+// Use express.json() for ALL routes including webhook
+// This ensures req.body is always a parsed JSON object
+app.use(express.json());
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.use("/webhook", webhookRouter);
