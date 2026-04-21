@@ -7,6 +7,7 @@ import { getSession, setSession } from "../services/redis.js";
 import { sendTextMessage } from "../services/whatsapp.js";
 import { handleMessage } from "../bot/botFlow.js";
 import { processReport } from "../services/reportPipeline.js";
+import { env } from "../config/env.js";
 
 const router = Router();
 
@@ -18,7 +19,7 @@ router.get("/", (req, res) => {
 
   console.log("Meta verification — mode:", mode, "token:", token);
 
-  if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+  if (mode === "subscribe" && token === env.WA_VERIFY_TOKEN) {
     console.log("✅  Webhook verified by Meta");
     return res.status(200).send(challenge);
   }
