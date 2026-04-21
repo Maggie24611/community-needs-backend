@@ -2,7 +2,6 @@
 // Receives incoming messages, does quick validation, then enqueues for async processing.
 
 import { Router } from 'express';
-import { enqueueReport } from '../queues/setup.js';
 
 const router = Router();
 
