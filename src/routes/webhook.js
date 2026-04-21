@@ -1,77 +1,97 @@
-// src/routes/webhook.js — WhatsApp webhook endpoint
-// Receives incoming messages, does quick validation, then enqueues for async processing.
+// src/routes/webhook.js
+// GET  /webhook  — Meta verification handshake
+// POST /webhook  — Incoming WhatsApp messages
 
-import { Router } from 'express';
+import { Router } from "express";
+import { getSession, setSession } from "../services/redis.js";
+import { sendTextMessage } from "../services/whatsapp.js";
+import { handleMessage } from "../bot/botFlow.js";
+import { processReport } from "../services/reportPipeline.js";
 
 const router = Router();
 
-/**
- * POST /webhook/whatsapp
- * Twilio / WhatsApp Business API webhook.
- * Responds immediately with 200 — processing is async via BullMQ.
- */
-router.post('/whatsapp', async (req, res) => {
+// ─── GET /webhook — Meta verification ────────────────────────────────────────
+router.get("/", (req, res) => {
+  const mode      = req.query["hub.mode"];
+  const token     = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  console.log("Meta verification — mode:", mode, "token:", token);
+
+  if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+    console.log("✅  Webhook verified by Meta");
+    return res.status(200).send(challenge);
+  }
+
+  console.warn("⚠️  Webhook verification failed");
+  return res.status(403).send("Forbidden");
+});
+
+// ─── POST /webhook — Incoming messages ───────────────────────────────────────
+router.post("/", async (req, res) => {
+  // Acknowledge immediately — Meta retries if no 200 within 20s
+  res.status(200).json({ status: "ok" });
+
   try {
     const body = req.body;
 
-    // ── Support both Twilio and WhatsApp Business API formats ──────────────
-    let sender_id, raw_text, lat, lng;
+    if (body.object !== "whatsapp_business_account") return;
 
-    if (body.From && body.Body) {
-      // Twilio format
-      sender_id = body.From;
-      raw_text  = body.Body;
-      lat       = body.Latitude  ? parseFloat(body.Latitude)  : null;
-      lng       = body.Longitude ? parseFloat(body.Longitude) : null;
-    } else if (body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
-      // WhatsApp Business Cloud API format
-      const msg = body.entry[0].changes[0].value.messages[0];
-      sender_id = msg.from;
-      raw_text  = msg.text?.body ?? msg.interactive?.button_reply?.title ?? '';
-      if (msg.location) {
-        lat = msg.location.latitude;
-        lng = msg.location.longitude;
+    for (const entry of body.entry ?? []) {
+      for (const change of entry.changes ?? []) {
+        if (change.field !== "messages") continue;
+
+        const value    = change.value;
+        const messages = value.messages ?? [];
+        const contacts = value.contacts ?? [];
+
+        for (const message of messages) {
+          if (message.type !== "text") continue;
+
+          const userPhone    = message.from;
+          const incomingText = message.text.body.trim();
+          const contactName  = contacts[0]?.profile?.name ?? "User";
+
+          console.log(`📩  [${userPhone}] ${contactName}: "${incomingText}"`);
+
+          // ── Load session ────────────────────────────────────────────────
+          const sessionState = await getSession(userPhone);
+
+          // ── Bot flow ────────────────────────────────────────────────────
+          const { reply, newSessionState, reportPayload } = await handleMessage(
+            userPhone,
+            incomingText,
+            sessionState
+          );
+
+          // ── Save session ────────────────────────────────────────────────
+          await setSession(userPhone, newSessionState);
+
+          // ── Send reply ──────────────────────────────────────────────────
+          if (reply) {
+            await sendTextMessage(userPhone, reply);
+          }
+
+          // ── Process completed report ────────────────────────────────────
+          if (reportPayload && reportPayload.rawText) {
+            console.log(`📋  Processing report for ${userPhone}...`);
+            try {
+              await processReport({
+                userPhone:    reportPayload.userPhone ?? userPhone,
+                rawText:      reportPayload.rawText,
+                consented:    reportPayload.consentGiven ?? false,
+                contactName,
+              });
+              console.log(`✅  Report processed for ${userPhone}`);
+            } catch (pipelineErr) {
+              console.error(`❌  Pipeline error for ${userPhone}:`, pipelineErr.message);
+            }
+          }
+        }
       }
-    } else {
-      return res.status(400).json({ error: 'Unrecognised webhook format' });
     }
-
-    if (!raw_text?.trim()) {
-      return res.status(200).json({ status: 'ignored', reason: 'empty message' });
-    }
-
-    const jobId = await enqueueReport({
-      sender_id,
-      raw_text:    raw_text.trim(),
-      lat,
-      lng,
-      ward:        null,   // will be resolved by classifier or geocoder
-      timestamp:   new Date().toISOString(),
-      source:      'whatsapp',
-    });
-
-    // Always respond 200 quickly — Twilio retries on timeout
-    res.status(200).json({ status: 'queued', job_id: jobId });
-
   } catch (err) {
-    console.error('[Webhook] Error:', err);
-    // Still return 200 to avoid Twilio retries flooding the queue
-    res.status(200).json({ status: 'error', message: err.message });
-  }
-});
-
-/**
- * GET /webhook/whatsapp — Twilio webhook verification
- */
-router.get('/whatsapp', (req, res) => {
-  const mode      = req.query['hub.mode'];
-  const token     = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  if (mode === 'subscribe' && token === process.env.WHATSAPP_VERIFY_TOKEN) {
-    res.status(200).send(challenge);
-  } else {
-    res.status(403).send('Forbidden');
+    console.error("❌  Webhook processing error:", err);
   }
 });
 
