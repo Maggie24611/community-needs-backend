@@ -1,112 +1,166 @@
 // src/queues/worker.js — BullMQ report processing worker
-// Pipeline: WhatsApp payload → Claude classify → embed → Supabase insert → Gemini recommend
+// Pipeline: WhatsApp payload → Groq classify → embed → Supabase insert → allocation agent
 
-import { Worker } from 'bullmq';
-import { connection } from './setup.js';
-import { sendToDeadLetter } from './deadLetter.js';
-import { classifyReport } from '../services/classifier.js';
-import { embedText } from '../services/embeddings.js';
-import { runGeminiAgent } from '../agents/geminiAgent.js';
-import { supabase } from '../services/supabase.js';
-import { enrichWithWard } from '../utils/geocoder.js';
-import { CONFIG } from '../../config/index.js';
+import { Worker } from "bullmq";
+import { env } from "../config/env.js";
+import { classifyReport } from "../services/groq.js";
+import { generateEmbedding } from "../services/embedding.js";
+import { geocodeLocation } from "../services/geocoding.js";
+import { runAllocationAgent } from "../agents/allocationAgent.js";
+import {
+  insertNeed,
+  insertReport,
+  writeAuditLog,
+  getVolunteersNear,
+  findSimilarNeeds,
+  incrementReportCount,
+} from "../services/supabase.js";
+import { enqueueAlertJob } from "./alertQueue.js";
+import { computeUrgencyScore, deriveTitleFromCategory } from "../services/urgencyScorer.js";
+import crypto from "crypto";
+
+const QUEUE_NAME = "volunteer-alerts";
+
+const connection = {
+  host:                 env.REDIS_HOST,
+  port:                 env.REDIS_PORT,
+  password:             env.REDIS_PASSWORD,
+  tls:                  {},
+  maxRetriesPerRequest: null,
+  enableReadyCheck:     false,
+};
+
+function hashPhone(phone) {
+  return crypto.createHash("sha256").update(phone).digest("hex");
+}
+
+function generateReferenceId() {
+  return `MUM-${Math.floor(1000 + Math.random() * 9000)}`;
+}
 
 export function startReportWorker() {
   const worker = new Worker(
-    CONFIG.QUEUE_REPORTS,
+    QUEUE_NAME,
     async (job) => {
-      const { sender_id, raw_text, lat, lng, ward, timestamp, source } = job.data;
+      const { userPhone, rawText, consented, contactName } = job.data;
 
-      console.log(`[Worker] Processing job ${job.id} from ${sender_id}`);
+      console.log(`[Worker] Processing job ${job.id} from ${userPhone}`);
 
-      // ── Step 1: Geo-enrich — resolve ward from lat/lng if missing ──────────
-      await job.updateProgress(5);
-      const geoPayload = await enrichWithWard({ lat, lng, ward });
-      const resolvedWard = geoPayload.ward;
-
-      // ── Step 2: Claude Sonnet Classification ───────────────────────────────
+      // ── Step 1: Classify via Groq ──────────────────────────────────────────
       await job.updateProgress(10);
-      const classification = await classifyReport(raw_text, { language: 'auto' });
+      const classification = await classifyReport(rawText);
       console.log(`[Worker] Classified: ${classification.category} / ${classification.urgency}`);
 
-      // ── Step 2: Generate embedding via Groq ────────────────────────────────
+      // ── Step 2: Geocode location ───────────────────────────────────────────
+      await job.updateProgress(20);
+      let geo = null;
+      try {
+        geo = await geocodeLocation(classification.location_text);
+        if (geo) console.log(`[Worker] Geocoded: (${geo.lat}, ${geo.lng})`);
+      } catch (err) {
+        console.warn("[Worker] Geocoding failed:", err.message);
+      }
+
+      // ── Step 3: Generate embedding ─────────────────────────────────────────
       await job.updateProgress(30);
-      const embeddingText = `${classification.category}: ${classification.summary}`;
-      const embedding = await embedText(embeddingText);
+      let embedding = null;
+      try {
+        embedding = await generateEmbedding(rawText);
+      } catch (err) {
+        console.warn("[Worker] Embedding failed:", err.message);
+      }
 
-      // ── Step 3: Insert need into Supabase ──────────────────────────────────
-      await job.updateProgress(50);
-
-      // Location: SRID=4326;POINT(lng lat) — lng FIRST
-      const locationWkt = lat && lng
-        ? `SRID=4326;POINT(${lng} ${lat})`
-        : null;
-
-      const { data: need, error: needError } = await supabase
-        .from('needs')
-        .insert({
-          description: raw_text,
-          summary:     classification.summary,
-          category:    classification.category,
-          urgency:     classification.urgency,
-          status:      'active',
-          ward:        classification.ward ?? resolvedWard ?? null,
-          location:    locationWkt,
-          lat:         lat ?? null,
-          lng:         lng ?? null,
-          embedding:   embedding,
-          source:      source ?? 'whatsapp',
-          reporter_id: sender_id,
-          metadata: {
-            classified_by:  classification.model_used,
-            classified_at:  classification.classified_at,
-            needs_followup: classification.needs_followup,
-            raw_timestamp:  timestamp,
-          },
-        })
-        .select()
-        .single();
-
-      if (needError) throw new Error(`Supabase insert (needs): ${needError.message}`);
-      console.log(`[Worker] Inserted need ${need.id}`);
-
-      // ── Step 4: Insert into reports table ─────────────────────────────────
-      await supabase.from('reports').insert({
-        need_id:   need.id,
-        raw_text:  raw_text,
-        sender_id: sender_id,
-        source:    source ?? 'whatsapp',
-        received_at: timestamp ?? new Date().toISOString(),
-      });
-
-      // ── Step 5: Audit log ─────────────────────────────────────────────────
-      await supabase.from('audit_log').insert({
-        entity_type: 'need',
-        entity_id:   need.id,
-        action:      'created',
-        actor:       'system:worker',
-        metadata: {
-          job_id:     job.id,
-          queue:      CONFIG.QUEUE_REPORTS,
-          classifier: classification.model_used,
-        },
-      });
-
-      // ── Step 6: Gemini ADK agent recommendation ───────────────────────────
-      await job.updateProgress(70);
-      if (lat && lng) {
+      // ── Step 4: Deduplication ──────────────────────────────────────────────
+      await job.updateProgress(40);
+      let existingNeed = null;
+      if (embedding && geo?.ward) {
         try {
-          const recommendation = await runGeminiAgent(
-            { ...need, lat, lng },
-            embedding
-          );
-          console.log(`[Worker] Recommendation generated (confidence: ${recommendation.confidence})`);
-        } catch (agentErr) {
-          // Non-fatal — log and continue
-          console.error(`[Worker] Gemini agent failed (non-fatal):`, agentErr.message);
+          const similar = await findSimilarNeeds({
+            queryEmbedding: embedding,
+            ward:           geo.ward,
+            threshold:      0.88,
+            count:          1,
+          });
+          if (similar && similar.length > 0) {
+            existingNeed = similar[0];
+            await incrementReportCount(existingNeed.id, existingNeed.report_count + 1);
+            console.log(`[Worker] Duplicate found: ${existingNeed.id}`);
+          }
+        } catch (err) {
+          console.warn("[Worker] Dedup failed:", err.message);
         }
+      }
+
+      // ── Step 5: Insert need ────────────────────────────────────────────────
+      await job.updateProgress(50);
+      let need;
+      if (existingNeed) {
+        need = existingNeed;
       } else {
-        console.warn(`[Worker] No lat/lng for need ${need.id} — skipping Gemini agent`);
+        const urgencyScore = computeUrgencyScore({
+          urgency:        classification.urgency,
+          report_count:   1,
+          affected_count: classification.affected_count,
+        });
+        const title = deriveTitleFromCategory(
+          classification.category,
+          geo?.formattedAddress ?? classification.location_text
+        );
+        const phoneHash = hashPhone(userPhone);
+
+        need = await insertNeed({
+          reference_id:        generateReferenceId(),
+          title,
+          summary:             classification.summary,
+          category:            classification.category,
+          urgency:             classification.urgency,
+          urgency_score:       urgencyScore,
+          ward:                geo?.ward ?? null,
+          lat:                 geo?.lat ?? null,
+          lng:                 geo?.lng ?? null,
+          affected_count:      classification.affected_count,
+          report_count:        1,
+          status:              "active",
+          embedding,
+          reporter_phone_hash: phoneHash,
+          reporter_consented:  consented ?? false,
+        });
+        console.log(`[Worker] Inserted need ${need.id}`);
+      }
+
+      // ── Step 6: Insert report ──────────────────────────────────────────────
+      await job.updateProgress(60);
+      const phoneHash = hashPhone(userPhone);
+      const report = await insertReport({
+        need_id:       need.id,
+        phone_hash:    phoneHash,
+        raw_message:   rawText,
+        language:      classification.language ?? "en",
+        location_text: classification.location_text,
+      });
+      console.log(`[Worker] Report inserted: ${report.id}`);
+
+      // ── Step 7: Audit log ──────────────────────────────────────────────────
+      await writeAuditLog({
+        user_id:    phoneHash,
+        action:     existingNeed ? "INCREMENT_REPORT_COUNT" : "INSERT_NEED",
+        table_name: "needs",
+        record_id:  need.id,
+      });
+
+      // ── Step 8: Fetch nearby volunteers & queue alerts ─────────────────────
+      await job.updateProgress(70);
+      if (geo) {
+        try {
+          const volunteers = await getVolunteersNear(geo.lat, geo.lng, 3000);
+          const top3 = volunteers.slice(0, 3);
+          for (const volunteer of top3) {
+            await enqueueAlertJob({ volunteer, need, geo, userPhone, contactName });
+          }
+          console.log(`[Worker] Queued alerts for ${top3.length} volunteer(s)`);
+        } catch (err) {
+          console.warn("[Worker] Volunteer alert failed:", err.message);
+        }
       }
 
       await job.updateProgress(100);
@@ -118,24 +172,18 @@ export function startReportWorker() {
     }
   );
 
-  worker.on('completed', (job, result) => {
+  worker.on("completed", (job, result) => {
     console.log(`[Worker] ✓ Job ${job.id} done → need_id=${result.need_id}`);
   });
 
-  worker.on('failed', async (job, err) => {
+  worker.on("failed", (job, err) => {
     console.error(`[Worker] ✗ Job ${job?.id} failed (attempt ${job?.attemptsMade}):`, err.message);
-    // After all retries exhausted, move to dead-letter queue
-    if (job && job.attemptsMade >= (job.opts?.attempts ?? 3)) {
-      await sendToDeadLetter(job, err).catch(dlqErr =>
-        console.error('[Worker] Failed to send to DLQ:', dlqErr.message)
-      );
-    }
   });
 
-  worker.on('error', (err) => {
-    console.error('[Worker] Worker error:', err);
+  worker.on("error", (err) => {
+    console.error("[Worker] Worker error:", err);
   });
 
-  console.log('[Worker] Report worker started, concurrency=5');
+  console.log("[Worker] Report worker started, concurrency=5");
   return worker;
 }
