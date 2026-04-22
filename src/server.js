@@ -14,6 +14,7 @@ import { supabase }           from "./services/supabase.js";
 import { generateEmbedding }  from "./services/embedding.js";
 import { classifyReport }     from "./services/groq.js";
 import { startReportWorker } from "./queues/worker.js";
+startReportWorker();
 
 const app    = express();
 const upload = multer({ storage: multer.memoryStorage() });
