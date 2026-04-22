@@ -1,3 +1,7 @@
+// src/agents/allocationAgent.js
+// Resource allocation agent using Groq llama-3.3-70b-versatile.
+// DO NOT change model name — llama-3.3-70b-versatile is the correct current model.
+
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
@@ -28,7 +32,7 @@ function summarizeByWard(grouped) {
   const summary = {};
   for (const [ward, items] of Object.entries(grouped)) {
     summary[ward] = {
-      count: items.length,
+      count:      items.length,
       categories: [...new Set(items.map(i => i.category).filter(Boolean))],
     };
   }
@@ -65,10 +69,9 @@ export async function runAllocationAgent() {
 
   if (volError) throw new Error(`Failed to fetch volunteers: ${volError.message}`);
 
-  // Summarize data to keep prompt small
-  const needsSummary = summarizeByWard(groupByWard(needs || []));
-  const historySummary = summarizeByWard(groupByWard(history || []));
-  const volunteerCount = countByWard(volunteers || []);
+  const needsSummary    = summarizeByWard(groupByWard(needs || []));
+  const historySummary  = summarizeByWard(groupByWard(history || []));
+  const volunteerCount  = countByWard(volunteers || []);
 
   const prompt = `You are a resource allocation expert for Mumbai NGOs.
 
@@ -89,21 +92,40 @@ Return ONLY a valid JSON array of exactly 5 objects with these fields:
 
 JSON array only. No explanation, no markdown.`;
 
-  console.log('Calling Groq API, prompt length:', prompt.length);
+  console.log('Calling Groq API for allocation, prompt length:', prompt.length);
 
-  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 1024,
-      temperature: 0.2
-    })
-  });
+  // ── Timeout handling — abort after 30 seconds ─────────────────────────────
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => {
+    controller.abort();
+    console.error("❌  Groq allocation agent timed out after 30s");
+  }, 30000);
+
+  let response;
+  try {
+    response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+        'Content-Type':  'application/json'
+      },
+      body: JSON.stringify({
+        model:       'llama-3.3-70b-versatile',
+        messages:    [{ role: 'user', content: prompt }],
+        max_tokens:  1024,
+        temperature: 0.2
+      }),
+      signal: controller.signal
+    });
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error('Allocation agent timed out — try again');
+    }
+    throw new Error(`Groq fetch failed: ${err.message}`);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     const err = await response.text();
@@ -112,19 +134,26 @@ JSON array only. No explanation, no markdown.`;
 
   const data = await response.json();
   const text = data.choices[0].message.content;
-  console.log('Groq raw response:', text.substring(0, 200));
+  console.log('Groq allocation response received, length:', text.length);
 
   const clean = text.replace(/```json|```/g, '').trim();
-  const recommendations = JSON.parse(clean);
+
+  let recommendations;
+  try {
+    recommendations = JSON.parse(clean);
+  } catch {
+    console.error("❌  Allocation agent non-JSON response:", text.substring(0, 200));
+    throw new Error("Allocation agent returned invalid JSON");
+  }
 
   await supabase.from('recommendations').insert({
     week_starting: new Date().toISOString().split('T')[0],
-    recommendations: recommendations,
-    ward_count: recommendations.length,
+    recommendations,
+    ward_count:    recommendations.length,
     input_summary: {
-      active_needs: (needs || []).length,
-      historical_records: (history || []).length,
-      available_volunteers: (volunteers || []).length
+      active_needs:        (needs || []).length,
+      historical_records:  (history || []).length,
+      available_volunteers:(volunteers || []).length,
     }
   });
 

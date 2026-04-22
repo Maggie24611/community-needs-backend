@@ -1,6 +1,6 @@
 // src/services/groq.js
-// Groq API — Llama 3 for classification AND allocation agent.
-// Day 6: Updated category and urgency values to match M2's schema exactly.
+// Groq API — llama-3.3-70b-versatile for ALL AI calls.
+// DO NOT change model name — llama3-70b-8192 and llama-3.1-70b-versatile are deprecated.
 
 import { env } from "../config/env.js";
 
@@ -14,57 +14,80 @@ Do not include markdown fences, explanation, or any text outside the JSON object
 
 Return exactly this JSON structure:
 {
-  "category": string,        // one of: "Food & water" | "Medical" | "Shelter" | "Education" | "Safety" | "Environment" | "Sanitation" | "Other"
-  "urgency": string,         // one of: "Critical" | "High" | "Medium" | "Low"
+  "category": string,        // one of: FOOD | MEDICAL | SHELTER | WATER | SAFETY | ENVIRONMENT | SANITATION | OTHER
+  "urgency": string,         // one of: "low" | "medium" | "high" | "critical"
   "summary": string,         // concise 1-2 sentence summary in English
   "affected_count": number,  // estimated number of people affected (default 1 if unknown)
   "location_text": string,   // location exactly as described by the reporter
   "language": string         // detected language code: "en" | "hi" | "mr" | "gu" | "other"
 }
 
-Category guidelines:
-- "Food & water": food shortage, hunger, drinking water issues
-- "Medical": injuries, illness, medical emergencies
-- "Shelter": housing, displacement, roof damage
-- "Education": school, children learning needs
-- "Safety": crime, accidents, danger
-- "Environment": pollution, floods, environmental hazards
-- "Sanitation": garbage, sewage, hygiene issues
-- "Other": anything that doesn't fit above
-
 Urgency guidelines:
-- Critical: immediate life threat, medical emergency, no food for children
-- High: serious need within hours, large group affected
-- Medium: need within a day, manageable situation
-- Low: non-urgent, informational`;
+- critical: immediate life threat, medical emergency, no food for children
+- high: serious need within hours, large group affected
+- medium: need within a day, manageable situation
+- low: non-urgent, informational`;
 
 /**
- * Classify a WhatsApp report using Groq (Llama 3).
+ * Classify a WhatsApp report using Groq (llama-3.3-70b-versatile).
  * @param {string} rawText
  * @returns {Promise<object>}
  */
 export async function classifyReport(rawText) {
-  const response = await fetch(GROQ_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type":  "application/json",
-      "Authorization": `Bearer ${env.GROQ_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model:       "llama-3.3-70b-versatile",
-      max_tokens:  512,
-      temperature: 0.1,
-      messages: [
-        { role: "system", content: CLASSIFY_SYSTEM_PROMPT },
-        { role: "user",   content: rawText },
-      ],
-    }),
-  });
+  // Guard against empty or too-short input
+  if (!rawText || rawText.trim().length < 3) {
+    console.warn("⚠️  classifyReport: input too short, returning default");
+    return {
+      category:       "Other",
+      urgency:        "Medium",
+      summary:        "Insufficient information provided",
+      affected_count: 1,
+      location_text:  "Location not specified",
+      language:       "en",
+    };
+  }
+
+  let response;
+  try {
+    response = await fetch(GROQ_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type":  "application/json",
+        "Authorization": `Bearer ${env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model:       "llama-3.3-70b-versatile",
+        max_tokens:  512,
+        temperature: 0.1,
+        messages: [
+          { role: "system", content: CLASSIFY_SYSTEM_PROMPT },
+          { role: "user",   content: rawText.trim() },
+        ],
+      }),
+    });
+  } catch (fetchErr) {
+    console.error("❌  Groq classify fetch error:", fetchErr.message);
+    return {
+      category:       "Other",
+      urgency:        "Medium",
+      summary:        "Classification service unavailable",
+      affected_count: 1,
+      location_text:  "Location not specified",
+      language:       "en",
+    };
+  }
 
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
     console.error("❌  Groq classify error:", JSON.stringify(err));
-    throw new Error(`Groq API error: ${response.status}`);
+    return {
+      category:       "Other",
+      urgency:        "Medium",
+      summary:        "Classification failed",
+      affected_count: 1,
+      location_text:  "Location not specified",
+      language:       "en",
+    };
   }
 
   const data = await response.json();
@@ -72,13 +95,20 @@ export async function classifyReport(rawText) {
 
   try {
     const parsed = JSON.parse(text);
+    const validCategories = ["FOOD", "MEDICAL", "SHELTER", "WATER", "SAFETY", "ENVIRONMENT", "SANITATION", "OTHER"];
+    const validUrgencies  = ["low", "medium", "high", "critical"];
 
-    const validCategories = ["Food & water", "Medical", "Shelter", "Education", "Safety", "Environment", "Sanitation", "Other"];
-    const validUrgencies  = ["Critical", "High", "Medium", "Low"];
+    // Map to Title Case urgency for DB compatibility
+    const urgencyMap = {
+      low:      "Low",
+      medium:   "Medium",
+      high:     "High",
+      critical: "Critical",
+    };
 
     return {
-      category:       validCategories.includes(parsed.category) ? parsed.category : "Other",
-      urgency:        validUrgencies.includes(parsed.urgency)   ? parsed.urgency  : "Medium",
+      category:       validCategories.includes(parsed.category) ? parsed.category : "OTHER",
+      urgency:        urgencyMap[parsed.urgency] ?? "Medium",
       summary:        parsed.summary        ?? "No summary available",
       affected_count: parseInt(parsed.affected_count, 10) || 1,
       location_text:  parsed.location_text  ?? "Location not specified",
@@ -86,7 +116,14 @@ export async function classifyReport(rawText) {
     };
   } catch {
     console.error("❌  Groq classify non-JSON:", text);
-    throw new Error("Classification parse error");
+    return {
+      category:       "Other",
+      urgency:        "Medium",
+      summary:        rawText.substring(0, 100),
+      affected_count: 1,
+      location_text:  "Location not specified",
+      language:       "en",
+    };
   }
 }
 
@@ -107,8 +144,8 @@ Each object must have exactly these fields:
 }`;
 
 /**
- * Run resource allocation analysis using Groq Llama 3.1.
- * @param {object} params
+ * Run resource allocation analysis using Groq llama-3.3-70b-versatile.
+ * @param {object} data
  * @returns {Promise<Array>}
  */
 export async function runAllocationLLM({ wardNeedsSummary, wardHistorySummary, wardVolunteerCount }) {
@@ -123,22 +160,28 @@ ${JSON.stringify(wardVolunteerCount, null, 2)}
 
 Return ONLY a JSON array of exactly 5 prioritised ward recommendations. No markdown, no explanation.`;
 
-  const response = await fetch(GROQ_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type":  "application/json",
-      "Authorization": `Bearer ${env.GROQ_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model:       "llama-3.1-70b-versatile",
-      max_tokens:  1024,
-      temperature: 0.2,
-      messages: [
-        { role: "system", content: ALLOCATION_SYSTEM_PROMPT },
-        { role: "user",   content: userPrompt },
-      ],
-    }),
-  });
+  let response;
+  try {
+    response = await fetch(GROQ_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type":  "application/json",
+        "Authorization": `Bearer ${env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model:       "llama-3.3-70b-versatile",
+        max_tokens:  1024,
+        temperature: 0.2,
+        messages: [
+          { role: "system", content: ALLOCATION_SYSTEM_PROMPT },
+          { role: "user",   content: userPrompt },
+        ],
+      }),
+    });
+  } catch (fetchErr) {
+    console.error("❌  Groq allocation fetch error:", fetchErr.message);
+    throw new Error("Allocation LLM unavailable");
+  }
 
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));

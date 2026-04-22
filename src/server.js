@@ -13,7 +13,8 @@ import { runAllocationAgent } from "./agents/allocationAgent.js";
 import { supabase }           from "./services/supabase.js";
 import { generateEmbedding }  from "./services/embedding.js";
 import { classifyReport }     from "./services/groq.js";
-import { startReportWorker } from "./queues/worker.js";
+import { startReportWorker }  from "./queues/worker.js";
+
 startReportWorker();
 
 const app    = express();
@@ -22,6 +23,9 @@ const upload = multer({ storage: multer.memoryStorage() });
 // ─── Allowed values ───────────────────────────────────────────────────────────
 const VALID_DATA_TYPES = ["survey", "field_report", "health_record", "drive_outcome", "census", "government_data"];
 const VALID_CATEGORIES = ["Food & water", "Medical", "Shelter", "Education", "Safety", "Environment", "Sanitation", "Other"];
+
+// Required columns — at least one of these must be present in CSV
+const REQUIRED_CSV_COLUMNS = ["description", "summary", "content", "text", "details", "note", "report"];
 
 // Map Groq classification categories to historical_data allowed categories
 function mapCategory(raw) {
@@ -41,18 +45,29 @@ function mapCategory(raw) {
 function mapDataType(raw) {
   if (!raw) return "field_report";
   const r = raw.toLowerCase().replace(/\s+/g, "_");
-  if (VALID_DATA_TYPES.includes(r))                           return r;
-  if (r.includes("survey"))                                   return "survey";
-  if (r.includes("health"))                                   return "health_record";
-  if (r.includes("census"))                                   return "census";
-  if (r.includes("government") || r.includes("govt"))        return "government_data";
-  if (r.includes("drive"))                                    return "drive_outcome";
+  if (VALID_DATA_TYPES.includes(r))                    return r;
+  if (r.includes("survey"))                            return "survey";
+  if (r.includes("health"))                            return "health_record";
+  if (r.includes("census"))                            return "census";
+  if (r.includes("government") || r.includes("govt")) return "government_data";
+  if (r.includes("drive"))                             return "drive_outcome";
   return "field_report";
 }
 
+// Validate a single CSV row has meaningful content
+function validateRow(row, rowIndex) {
+  const values = Object.values(row).filter(v => v && String(v).trim().length > 0);
+  if (values.length === 0) {
+    return `Row ${rowIndex}: empty row`;
+  }
+  const rawContent = Object.values(row).join(" ").trim();
+  if (rawContent.length < 5) {
+    return `Row ${rowIndex}: insufficient content (too short)`;
+  }
+  return null; // null = valid
+}
+
 // ─── Body parsing ─────────────────────────────────────────────────────────────
-// Use express.json() for ALL routes including webhook
-// This ensures req.body is always a parsed JSON object
 app.use(express.json());
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
@@ -85,6 +100,12 @@ app.post("/api/historical-data/upload", upload.single("file"), async (req, res) 
     return res.status(400).json({ success: false, error: "No file uploaded" });
   }
 
+  // Validate file type
+  const filename = req.file.originalname?.toLowerCase() ?? "";
+  if (!filename.endsWith(".csv")) {
+    return res.status(400).json({ success: false, error: "Only CSV files are accepted" });
+  }
+
   let rows;
   try {
     rows = parse(req.file.buffer, {
@@ -96,13 +117,36 @@ app.post("/api/historical-data/upload", upload.single("file"), async (req, res) 
     return res.status(400).json({ success: false, error: `CSV parse error: ${err.message}` });
   }
 
-  console.log(`📂  Processing ${rows.length} CSV rows...`);
+  // Validate CSV has rows
+  if (!rows || rows.length === 0) {
+    return res.status(400).json({ success: false, error: "CSV file is empty" });
+  }
+
+  // Validate CSV has columns
+  const columns = Object.keys(rows[0]).map(c => c.toLowerCase());
+  if (columns.length === 0) {
+    return res.status(400).json({ success: false, error: "CSV has no columns" });
+  }
+
+  console.log(`📂  Processing ${rows.length} CSV rows, columns: ${columns.join(", ")}`);
+
   let processed = 0;
   const errors  = [];
+  const skipped = [];
 
-  for (const row of rows) {
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+
+    // Validate row content
+    const validationError = validateRow(row, i + 1);
+    if (validationError) {
+      skipped.push(validationError);
+      console.warn(`⚠️  Skipping: ${validationError}`);
+      continue;
+    }
+
     try {
-      const rawContent = Object.values(row).join(" ");
+      const rawContent = Object.values(row).join(" ").trim();
 
       // Classify using Groq
       const structured = await classifyReport(
@@ -118,6 +162,12 @@ app.post("/api/historical-data/upload", upload.single("file"), async (req, res) 
       const ward      = structured.location_text || row.ward || row.location || null;
       const date      = row.date || row.date_recorded || new Date().toISOString().split("T")[0];
 
+      // Validate date format
+      const parsedDate = new Date(date);
+      const finalDate  = isNaN(parsedDate.getTime())
+        ? new Date().toISOString().split("T")[0]
+        : date;
+
       const { error } = await supabase
         .from("historical_data")
         .insert({
@@ -125,7 +175,7 @@ app.post("/api/historical-data/upload", upload.single("file"), async (req, res) 
           data_type,
           ward,
           category,
-          date_recorded:   date,
+          date_recorded:   finalDate,
           summary:         structured.summary ?? rawContent.substring(0, 200),
           raw_content:     rawContent,
           structured_json: structured,
@@ -133,14 +183,15 @@ app.post("/api/historical-data/upload", upload.single("file"), async (req, res) 
         });
 
       if (error) {
-        console.warn(`⚠️  Row insert failed:`, error.message);
-        errors.push({ row: processed + 1, error: error.message });
+        console.warn(`⚠️  Row ${i + 1} insert failed:`, error.message);
+        errors.push({ row: i + 1, error: error.message });
       } else {
         processed++;
+        console.log(`✅  Row ${i + 1} inserted — category: ${category}, data_type: ${data_type}`);
       }
     } catch (err) {
-      console.warn(`⚠️  Row ${processed + 1} error:`, err.message);
-      errors.push({ row: processed + 1, error: err.message });
+      console.warn(`⚠️  Row ${i + 1} error:`, err.message);
+      errors.push({ row: i + 1, error: err.message });
     }
   }
 
@@ -148,6 +199,7 @@ app.post("/api/historical-data/upload", upload.single("file"), async (req, res) 
     success:   true,
     processed,
     total:     rows.length,
+    skipped:   skipped.length > 0 ? skipped : undefined,
     errors:    errors.length > 0 ? errors : undefined,
     message:   `${processed} of ${rows.length} records added to historical_data`,
   });
