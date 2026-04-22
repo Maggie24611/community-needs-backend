@@ -102,7 +102,7 @@ export async function processReport({
       category:            classification.category,
       urgency:             classification.urgency,
       urgency_score:       urgencyScore,
-      ward:                geo?.ward ?? null,
+      ward: geo?.ward ?? null,
       lat:                 geo?.lat ?? null,
       lng:                 geo?.lng ?? null,
       affected_count:      classification.affected_count,
