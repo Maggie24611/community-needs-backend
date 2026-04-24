@@ -1,5 +1,6 @@
 // src/queues/worker.js — BullMQ report processing worker
-// Pipeline: WhatsApp payload → Groq classify → embed → Supabase insert → allocation agent
+// Day 9: Added dead letter queue for failed jobs.
+// Pipeline: WhatsApp payload → Groq classify → embed → Supabase insert → alert dispatch
 
 import { Worker } from "bullmq";
 import { env } from "../config/env.js";
@@ -16,6 +17,7 @@ import {
   incrementReportCount,
 } from "../services/supabase.js";
 import { enqueueAlertJob } from "./alertQueue.js";
+import { sendToDeadLetter } from "./deadLetter.js";
 import { computeUrgencyScore, deriveTitleFromCategory } from "../services/urgencyScorer.js";
 import crypto from "crypto";
 
@@ -31,7 +33,8 @@ const connection = {
 };
 
 function hashPhone(phone) {
-  return crypto.createHash("sha256").update(phone).digest("hex");
+  if (!phone) return "anonymous";
+  return crypto.createHash("sha256").update(String(phone)).digest("hex");
 }
 
 function generateReferenceId() {
@@ -46,12 +49,12 @@ export function startReportWorker() {
 
       console.log(`[Worker] Processing job ${job.id} from ${userPhone}`);
 
-      // ── Step 1: Classify via Groq ──────────────────────────────────────────
+      // ── Step 1: Classify via Groq ────────────────────────────────────────
       await job.updateProgress(10);
       const classification = await classifyReport(rawText);
       console.log(`[Worker] Classified: ${classification.category} / ${classification.urgency}`);
 
-      // ── Step 2: Geocode location ───────────────────────────────────────────
+      // ── Step 2: Geocode ──────────────────────────────────────────────────
       await job.updateProgress(20);
       let geo = null;
       try {
@@ -61,7 +64,7 @@ export function startReportWorker() {
         console.warn("[Worker] Geocoding failed:", err.message);
       }
 
-      // ── Step 3: Generate embedding ─────────────────────────────────────────
+      // ── Step 3: Generate embedding ───────────────────────────────────────
       await job.updateProgress(30);
       let embedding = null;
       try {
@@ -70,7 +73,7 @@ export function startReportWorker() {
         console.warn("[Worker] Embedding failed:", err.message);
       }
 
-      // ── Step 4: Deduplication ──────────────────────────────────────────────
+      // ── Step 4: Deduplication ────────────────────────────────────────────
       await job.updateProgress(40);
       let existingNeed = null;
       if (embedding && geo?.ward) {
@@ -91,7 +94,7 @@ export function startReportWorker() {
         }
       }
 
-      // ── Step 5: Insert need ────────────────────────────────────────────────
+      // ── Step 5: Insert need ──────────────────────────────────────────────
       await job.updateProgress(50);
       let need;
       if (existingNeed) {
@@ -128,38 +131,46 @@ export function startReportWorker() {
         console.log(`[Worker] Inserted need ${need.id}`);
       }
 
-      // ── Step 6: Insert report ──────────────────────────────────────────────
+      // ── Step 6: Insert report ────────────────────────────────────────────
       await job.updateProgress(60);
       const phoneHash = hashPhone(userPhone);
-      const report = await insertReport({
-        need_id:       need.id,
-        phone_hash:    phoneHash,
-        raw_message:   rawText,
-        language:      classification.language ?? "en",
-        location_text: classification.location_text,
-      });
-      console.log(`[Worker] Report inserted: ${report.id}`);
+      try {
+        const report = await insertReport({
+          need_id:       need.id,
+          phone_hash:    phoneHash,
+          raw_message:   rawText,
+          language:      classification.language ?? "en",
+          location_text: classification.location_text,
+        });
+        console.log(`[Worker] Report inserted: ${report.id}`);
+      } catch (err) {
+        console.warn("[Worker] insertReport failed (non-fatal):", err.message);
+      }
 
-      // ── Step 7: Audit log ──────────────────────────────────────────────────
-      await writeAuditLog({
-        user_id:    phoneHash,
-        action:     existingNeed ? "INCREMENT_REPORT_COUNT" : "INSERT_NEED",
-        table_name: "needs",
-        record_id:  need.id,
-      });
+      // ── Step 7: Audit log ────────────────────────────────────────────────
+      try {
+        await writeAuditLog({
+          user_id:    phoneHash,
+          action:     existingNeed ? "INCREMENT_REPORT_COUNT" : "INSERT_NEED",
+          table_name: "needs",
+          record_id:  need.id,
+        });
+      } catch (err) {
+        console.warn("[Worker] Audit log failed (non-fatal):", err.message);
+      }
 
-      // ── Step 8: Fetch nearby volunteers & queue alerts ─────────────────────
+      // ── Step 8: Fetch volunteers & queue alerts ──────────────────────────
       await job.updateProgress(70);
       if (geo) {
         try {
           const volunteers = await getVolunteersNear(geo.lat, geo.lng, 3000);
-          const top3 = volunteers.slice(0, 3);
+          const top3 = (volunteers || []).slice(0, 3);
           for (const volunteer of top3) {
             await enqueueAlertJob({ volunteer, need, geo, userPhone, contactName });
           }
           console.log(`[Worker] Queued alerts for ${top3.length} volunteer(s)`);
         } catch (err) {
-          console.warn("[Worker] Volunteer alert failed:", err.message);
+          console.warn("[Worker] Volunteer alert failed (non-fatal):", err.message);
         }
       }
 
@@ -176,8 +187,12 @@ export function startReportWorker() {
     console.log(`[Worker] ✓ Job ${job.id} done → need_id=${result.need_id}`);
   });
 
-  worker.on("failed", (job, err) => {
+  worker.on("failed", async (job, err) => {
     console.error(`[Worker] ✗ Job ${job?.id} failed (attempt ${job?.attemptsMade}):`, err.message);
+    // After all retries exhausted → send to dead letter queue
+    if (job && job.attemptsMade >= (job.opts?.attempts ?? 3)) {
+      await sendToDeadLetter(job, err);
+    }
   });
 
   worker.on("error", (err) => {
