@@ -7,8 +7,8 @@ import { env } from "../config/env.js";
 const QUEUE_NAME = "volunteer-alerts";
 
 const connection = {
-  host:                 env.REDIS_HOST,
-  port:                 env.REDIS_PORT,
+  host:                 "causal-dove-68279.upstash.io",
+  port:                 6379,
   password:             env.REDIS_PASSWORD,
   tls:                  {},
   maxRetriesPerRequest: null,

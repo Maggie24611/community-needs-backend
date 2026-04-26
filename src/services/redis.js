@@ -1,32 +1,18 @@
 // src/services/redis.js
-// Upstash Redis via ioredis.
-// ECONNRESET is normal on Upstash free tier — ioredis auto-reconnects.
+// Upstash Redis via @upstash/redis client.
+// Switched from ioredis to @upstash/redis for better Upstash compatibility.
 
-import Redis from "ioredis";
+import { Redis } from "@upstash/redis";
 import { env } from "../config/env.js";
 
 const SESSION_TTL_SECONDS = 60 * 60 * 2; // 2 hours
 
-export const redis = new Redis(env.UPSTASH_REDIS_URL, {
-  maxRetriesPerRequest:    null,
-  enableReadyCheck:        false,
-  lazyConnect:             false,
-  retryStrategy(times) {
-    // Reconnect after min(times * 200ms, 2000ms)
-    return Math.min(times * 200, 2000);
-  },
+export const redis = new Redis({
+  url:   env.UPSTASH_REDIS_URL,
+  token: env.REDIS_PASSWORD,
 });
 
-redis.on("connect",           () => console.log("✅  Redis connected"));
-redis.on("reconnecting",      () => console.log("🔄  Redis reconnecting..."));
-redis.on("error", (err) => {
-  // ECONNRESET is expected on Upstash free tier — suppress noisy logs
-  if (err.code === "ECONNRESET" || err.message?.includes("ECONNRESET")) {
-    console.log("⚠️  Redis ECONNRESET — auto-reconnecting (normal on Upstash)");
-  } else {
-    console.error("❌  Redis error:", err.message);
-  }
-});
+console.log("✅  Redis client initialized (Upstash HTTP)");
 
 const sessionKey = (phone) => `session:${phone}`;
 
@@ -34,8 +20,10 @@ export async function getSession(phone) {
   try {
     const raw = await redis.get(sessionKey(phone));
     if (!raw) return {};
+    if (typeof raw === "object") return raw;
     return JSON.parse(raw);
-  } catch {
+  } catch (err) {
+    console.warn("⚠️  getSession failed:", err.message);
     return {};
   }
 }
@@ -49,8 +37,7 @@ export async function setSession(phone, state) {
     await redis.set(
       sessionKey(phone),
       JSON.stringify(state),
-      "EX",
-      SESSION_TTL_SECONDS
+      { ex: SESSION_TTL_SECONDS }
     );
   } catch (err) {
     console.warn("⚠️  setSession failed:", err.message);
