@@ -2,9 +2,11 @@
 // Express app entry point.
 // Groq llama-3.3-70b-versatile for all AI calls.
 // Body parsing: express.json() for all routes including webhook.
+// CORS: enabled for Vercel dashboard.
 
 import "./config/env.js";
 import express   from "express";
+import cors      from "cors";
 import multer    from "multer";
 import { parse } from "csv-parse/sync";
 import { env }   from "./config/env.js";
@@ -14,7 +16,6 @@ import { supabase }           from "./services/supabase.js";
 import { generateEmbedding }  from "./services/embedding.js";
 import { classifyReport }     from "./services/groq.js";
 import { startReportWorker }  from "./queues/worker.js";
-import cors from "cors";
 
 startReportWorker();
 
@@ -24,9 +25,6 @@ const upload = multer({ storage: multer.memoryStorage() });
 // ─── Allowed values ───────────────────────────────────────────────────────────
 const VALID_DATA_TYPES = ["survey", "field_report", "health_record", "drive_outcome", "census", "government_data"];
 const VALID_CATEGORIES = ["Food & water", "Medical", "Shelter", "Education", "Safety", "Environment", "Sanitation", "Other"];
-
-// Required columns — at least one of these must be present in CSV
-const REQUIRED_CSV_COLUMNS = ["description", "summary", "content", "text", "details", "note", "report"];
 
 // Map Groq classification categories to historical_data allowed categories
 function mapCategory(raw) {
@@ -58,27 +56,26 @@ function mapDataType(raw) {
 // Validate a single CSV row has meaningful content
 function validateRow(row, rowIndex) {
   const values = Object.values(row).filter(v => v && String(v).trim().length > 0);
-  if (values.length === 0) {
-    return `Row ${rowIndex}: empty row`;
-  }
+  if (values.length === 0) return `Row ${rowIndex}: empty row`;
   const rawContent = Object.values(row).join(" ").trim();
-  if (rawContent.length < 5) {
-    return `Row ${rowIndex}: insufficient content (too short)`;
-  }
-  return null; // null = valid
+  if (rawContent.length < 5) return `Row ${rowIndex}: insufficient content`;
+  return null;
 }
+
+// ─── CORS ─────────────────────────────────────────────────────────────────────
+app.use(cors({
+  origin: [
+    "https://sahyog-dashboard.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+  ],
+  methods:      ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
+app.options("*", cors());
 
 // ─── Body parsing ─────────────────────────────────────────────────────────────
 app.use(express.json());
-
-app.use(cors({
-  origin: "https://sahyog-dashboard.vercel.app",
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type"],
-}));
-
-// Handle preflight requests
-app.options("*", cors());
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.use("/webhook", webhookRouter);
@@ -104,13 +101,23 @@ app.get("/api/recommendations", async (_req, res) => {
   }
 });
 
+// ─── Alias for frontend ───────────────────────────────────────────────────────
+app.get("/recommendations", async (_req, res) => {
+  try {
+    const recommendations = await runAllocationAgent();
+    res.json({ success: true, data: recommendations });
+  } catch (err) {
+    console.error("❌  Agent error:", err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ─── CSV Historical Data Upload ───────────────────────────────────────────────
 app.post("/api/historical-data/upload", upload.single("file"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ success: false, error: "No file uploaded" });
   }
 
-  // Validate file type
   const filename = req.file.originalname?.toLowerCase() ?? "";
   if (!filename.endsWith(".csv")) {
     return res.status(400).json({ success: false, error: "Only CSV files are accepted" });
@@ -127,12 +134,10 @@ app.post("/api/historical-data/upload", upload.single("file"), async (req, res) 
     return res.status(400).json({ success: false, error: `CSV parse error: ${err.message}` });
   }
 
-  // Validate CSV has rows
   if (!rows || rows.length === 0) {
     return res.status(400).json({ success: false, error: "CSV file is empty" });
   }
 
-  // Validate CSV has columns
   const columns = Object.keys(rows[0]).map(c => c.toLowerCase());
   if (columns.length === 0) {
     return res.status(400).json({ success: false, error: "CSV has no columns" });
@@ -147,32 +152,26 @@ app.post("/api/historical-data/upload", upload.single("file"), async (req, res) 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
 
-    // Validate row content
     const validationError = validateRow(row, i + 1);
     if (validationError) {
       skipped.push(validationError);
-      console.warn(`⚠️  Skipping: ${validationError}`);
       continue;
     }
 
     try {
       const rawContent = Object.values(row).join(" ").trim();
 
-      // Classify using Groq
       const structured = await classifyReport(
         `Extract NGO record info from: ${JSON.stringify(row)}`
       );
 
-      // Generate embedding
       const embedding = await generateEmbedding(rawContent);
 
-      // Map to allowed values
       const category  = mapCategory(structured.category || row.category);
       const data_type = mapDataType(row.data_type || row.type || "");
       const ward      = structured.location_text || row.ward || row.location || null;
       const date      = row.date || row.date_recorded || new Date().toISOString().split("T")[0];
 
-      // Validate date format
       const parsedDate = new Date(date);
       const finalDate  = isNaN(parsedDate.getTime())
         ? new Date().toISOString().split("T")[0]
@@ -197,7 +196,6 @@ app.post("/api/historical-data/upload", upload.single("file"), async (req, res) 
         errors.push({ row: i + 1, error: error.message });
       } else {
         processed++;
-        console.log(`✅  Row ${i + 1} inserted — category: ${category}, data_type: ${data_type}`);
       }
     } catch (err) {
       console.warn(`⚠️  Row ${i + 1} error:`, err.message);
