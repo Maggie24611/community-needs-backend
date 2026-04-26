@@ -14,6 +14,7 @@ import { supabase }           from "./services/supabase.js";
 import { generateEmbedding }  from "./services/embedding.js";
 import { classifyReport }     from "./services/groq.js";
 import { startReportWorker }  from "./queues/worker.js";
+import cors from "cors";
 
 startReportWorker();
 
@@ -69,6 +70,15 @@ function validateRow(row, rowIndex) {
 
 // ─── Body parsing ─────────────────────────────────────────────────────────────
 app.use(express.json());
+
+app.use(cors({
+  origin: "https://sahyog-dashboard.vercel.app",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type"],
+}));
+
+// Handle preflight requests
+app.options("*", cors());
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.use("/webhook", webhookRouter);
